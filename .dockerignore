@@ -1,0 +1,55 @@
+# Python 기본
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.db
+*.sqlite3
+
+# 가상환경 폴더
+venv/
+.venv/
+env/
+ENV/
+pip-wheel-metadata/
+
+# IDE/에디터 설정
+.idea/
+.vscode/
+*.swp
+
+# 테스트/샘플/문서
+tests/
+test_*/
+docs/
+*.md
+
+# 기타 빌드 산출물, 캐시
+build/
+dist/
+.eggs/
+*.egg-info/
+*.egg
+
+# 민감정보 예시
+*.pem
+*.key
+
+# OS/툴 자동생성
+.DS_Store
+Thumbs.db
+
+# Dockerfile 자체
+Dockerfile
+docker-compose.yml
+
+# 필요 없는 기타 대형/임시 파일
+*.log
+*.bak
+# 가상환경, 캐시, IDE, VCS
+.vscode
+.idea
+.pytest_cache/
+.git
+.gitignore
+.lock

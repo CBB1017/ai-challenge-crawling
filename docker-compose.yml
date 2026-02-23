@@ -1,0 +1,43 @@
+services:
+  browserless:
+    image: browserless/chrome:latest
+    environment:
+      - TOKEN=01QWI6OUT42U8
+      - TZ=Asia/Seoul
+    ports:
+      - "3001:3000"
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"   # 로그 파일 1개당 최대 20MB
+        max-file: "5"     # 최대 5개 파일까지만 보관
+    networks:
+      - attendance
+  crawling:
+    image: crawling:latest
+    container_name: attendance_python
+    environment:
+      - PYTHONUNBUFFERED=1
+      - CDP_ENDPOINT=ws://browserless:3000?token=01QWI6OUT42U8
+      - PORT=8080
+      - LOG_LEVEL=DEBUG
+      - GROUPWARE_DOMAIN=https://ekp.brycenkorea.co.kr:1212
+      - LOGIN_ID=bc.mun
+      - LOGIN_PW=attendanceT2@
+      - BACKEND_DOMAIN=http://attendance_back:8080
+      - TOKEN=01QWI6OUT42U8
+      - TZ=Asia/Seoul
+    ports:
+      - "8081:8080"
+    depends_on:
+      - browserless
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    networks:
+      - attendance
+networks:
+  attendance:
+    external: true
