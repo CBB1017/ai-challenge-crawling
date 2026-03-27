@@ -1,36 +1,64 @@
 import re
 import os
 from loguru import logger
-from .base import BaseCrawler
 from bs4 import BeautifulSoup
+from app.core.server import BaseCrawler
 
 
 class MeetingRoomCrawler(BaseCrawler):
-    def __init__(self, login_info: dict):
-        super().__init__(login_info)
+    def __init__(self, login_url: str, username: str, password: str, cookies: list = None):
+        super().__init__(login_url, username, password, cookies)
 
-    def get_meeting_room_reservation(self):
+    async def fetch_reservations(self, groupware_domain: str, room_name: str = None):
+        # 1. 쿠키(세션) 확인 및 자동 로그인
+        if not self.cookies:
+            success, new_cookies = await self.login()
+            if not success:
+                return {"status": "fail", "message": "로그인 실패", "data": None}
+            self.cookies = new_cookies
+
         try:
-            url = os.environ["GROUPWARE_DOMAIN"] + "/RsvObjMgr/RsvObj_List?cmbCateNo=1#RsvObjMgrLeftBoxShare0"
-            self.page.goto(url)
-            self.page.wait_for_timeout(2000)  # (필요에 따라 wait_for_selector('table.table_title') 등 사용)
+            # 2. 회의실 예약 페이지 이동
+            url = f"{groupware_domain}/RsvObjMgr/RsvObj_List?cmbCateNo=1#RsvObjMgrLeftBoxShare0"
+            await self.page.goto(url)
 
-            # 전체 테이블 소스 가져오기
-            table = self.page.query_selector('table')
-            if not table:
+            # 세션 만료 시 재로그인 처리
+            if "login" in self.page.url.lower():
+                logger.warning("세션 만료. 재로그인 시도...")
+                success, self.cookies = await self.login()
+                if not success:
+                    return {"status": "fail", "message": "재로그인 실패", "data": None}
+                await self.page.goto(url)
+
+            # 무조건 대기하기보다 테이블이 렌더링될 때까지 대기
+            try:
+                table_element = await self.page.wait_for_selector('table.table_title, table', timeout=3000)
+            except Exception:
+                # 렌더링 지연 시 기존 방식인 2초 강제 대기로 폴백
+                await self.page.wait_for_timeout(2000)
+                table_element = await self.page.query_selector('table')
+
+            if not table_element:
                 logger.error("[ERROR] 예약 테이블이 없습니다.")
-                return None
+                return {"status": "fail", "message": "예약 테이블을 찾을 수 없습니다.", "data": None}
 
-            html = table.inner_html()
+            html = await table_element.inner_html()
+            parsed_data = self.parse_meeting_room_table(f"<table>{html}</table>")
 
-            # 파싱 함수는 위에서 준 parse_meeting_room_table 활용
-            parsed = self.parse_meeting_room_table(f"<table>{html}</table>")
+            # 💡 추천 로직: room_name 파라미터가 들어왔을 때만 필터링
+            if room_name:
+                parsed_data = [room for room in parsed_data if room_name in room["회의실명"]]
 
-            return parsed
+            return {
+                "status": "success",
+                "message": "회의실 예약 조회 성공",
+                "data": parsed_data,
+                "cookies": self.cookies
+            }
 
         except Exception as e:
             logger.error(f"[ERROR] 회의실 예약 데이터 크롤링 실패: {e}")
-            return None
+            return {"status": "fail", "message": str(e), "data": None}
 
     @staticmethod
     def _parse_room_kor_and_detail(room_html):

@@ -3,104 +3,81 @@ import re
 
 from loguru import logger
 from bs4 import BeautifulSoup
-from app.crawler.base import BaseCrawler
 import asyncio
+
+from app.core.server import BaseCrawler
 
 
 class MemberCrawler(BaseCrawler):
-    async def run_team_member_tree(self):
-        await self.setup_driver()
-        try:
-            logger.info("[STEP1] 로그인 시도")
-            if not await self.login():
-                logger.error("[STEP1] 로그인 실패")
-                return {"summary": "로그인 실패"}
+    def __init__(self, login_url: str, username: str, password: str, cookies: list = None):
+        super().__init__(login_url, username, password, cookies)
 
+    async def fetch_members(self, groupware_domain: str):
+        # 1. 쿠키 확인 및 자동 로그인
+        if not self.cookies:
+            success, new_cookies = await self.login()
+            if not success:
+                logger.error("[STEP1] 로그인 실패")
+                return {"status": "fail", "message": "로그인 실패", "data": None}
+            self.cookies = new_cookies
+
+        try:
             logger.info("[STEP2] 조직도/이메일 동시 크롤링 시작")
-            try:
-                tree_js, email_options_html = await asyncio.gather(
-                    self.get_tree_js_data(),
-                    self.get_email_options_html()
-                )
-                logger.debug(tree_js[:1000])  # 500글자까지, 더 길면 늘려서!
-            except Exception as e:
-                logger.exception(f"[STEP2] 크롤링 중 예외 발생: {e}")
-                return {"summary": "크롤링 예외 발생"}
+            # 2. 동시 크롤링 (gather)
+            tree_js, email_options_html = await asyncio.gather(
+                self.get_tree_js_data(groupware_domain),
+                self.get_email_options_html(groupware_domain)
+            )
 
             if not tree_js:
-                logger.error("[STEP2] 조직도 JS 데이터 없음")
-                return {"summary": "조직도 데이터 없음"}
+                return {"status": "fail", "message": "조직도 데이터 없음", "data": None}
             if not email_options_html:
-                logger.error("[STEP2] 이메일 옵션 HTML 없음")
-                return {"summary": "이메일 데이터 없음"}
+                return {"status": "fail", "message": "이메일 데이터 없음", "data": None}
 
-            logger.info("[STEP3] d.add 파싱 시작")
-            try:
-                node_list = self.parse_d_add_lines(tree_js)
-                logger.info(f"[STEP3] 파싱된 노드 개수: {len(node_list)}")
-                logger.debug(f"[DEBUG] 노드 샘플: {node_list[:20]}")
-            except Exception as e:
-                logger.exception(f"[STEP3] d.add 파싱 예외: {e}")
-                return {"summary": "d.add 파싱 오류"}
+            # 3. 데이터 파싱 및 병합
+            logger.info("[STEP3~6] 파싱 및 병합 시작")
+            node_list = self.parse_d_add_lines(tree_js)
+            email_map, name_count = self.get_email_map(email_options_html)
+            teams = self.extract_teams_and_members(node_list)
+            merged_teams = self.merge_member_email(teams, email_map, name_count)
 
-            logger.info("[STEP4] 이메일 맵 생성")
-            try:
-                email_map, name_count = self.get_email_map(email_options_html)
-                logger.info(f"[STEP4] 파싱된 이메일 option 개수: {len(email_map)}")
-            except Exception as e:
-                logger.exception(f"[STEP4] 이메일 파싱 예외: {e}")
-                return {"summary": "이메일 파싱 오류"}
-
-            logger.info("[STEP5] 팀/멤버 추출 시작")
-            try:
-                teams = self.extract_teams_and_members(node_list)
-                logger.info(f"[STEP5] 추출된 팀 개수: {len(teams)}")
-                logger.debug(f"[STEP5] 샘플 팀: {teams[:1]}")
-            except Exception as e:
-                logger.exception(f"[STEP5] 팀/멤버 추출 예외: {e}")
-                return {"summary": "팀/멤버 추출 오류"}
-
-            logger.info("[STEP6] 이메일 병합 시작")
-            try:
-                merged_teams = self.merge_member_email(teams, email_map, name_count)
-                logger.info(f"[STEP6] 병합 완료, 샘플: {merged_teams[:1]}")
-            except Exception as e:
-                logger.exception(f"[STEP6] 이메일 병합 예외: {e}")
-                return {"summary": "이메일 병합 오류"}
-
+            # 4. 후처리
             logger.info("[STEP7] None -> 빈 문자열 처리")
-            try:
-                result = self.none_to_empty(merged_teams)
-                logger.info(f"[STEP7] 최종 결과 샘플: {result[:1]}")
-            except Exception as e:
-                logger.exception(f"[STEP7] None->빈문자 변환 예외: {e}")
-                return {"summary": "None 처리 오류"}
+            result = self.none_to_empty(merged_teams)
 
-            return result
-        finally:
-            logger.info("[CLOSE] 브라우저/리소스 종료")
-            await self.close()
+            return {
+                "status": "success",
+                "message": "조직도 조회 성공",
+                "data": result,
+                "cookies": self.cookies
+            }
 
-    async def get_email_options_html(self):
-        email_url = os.environ[
-                        "GROUPWARE_DOMAIN"] + "/includes/Comm_PopSearchResult?tmpD=&tmpA=A&tmpC=0&tmpB=17&tmpE=AreaAll&tmpf=%EC%A0%84%EC%B2%B4&tmpG=&tmpH=email"
-        page = await self.browser.contexts[0].new_page()
+        except Exception as e:
+            logger.exception(f"크롤링 중 예외 발생: {e}")
+            return {"status": "fail", "message": str(e), "data": None}
+
+    async def get_email_options_html(self, groupware_domain: str):
+        email_url = f"{groupware_domain}/includes/Comm_PopSearchResult?tmpD=&tmpA=A&tmpC=0&tmpB=17&tmpE=AreaAll&tmpf=%EC%A0%84%EC%B2%B4&tmpG=&tmpH=email"
+
+        # 💡 개선: 공용 browser context 대신, 쿠키가 주입된 독립 context 사용
+        page = await self.context.new_page()
         await page.goto(email_url)
         html = await page.content()
         await page.close()
         return html
 
-    async def get_tree_js_data(self):
-        tree_url = os.environ["GROUPWARE_DOMAIN"] + "/Tree/TreeVertical_R2"
-        page = await self.browser.contexts[0].new_page()
+    async def get_tree_js_data(self, groupware_domain: str):
+        tree_url = f"{groupware_domain}/Tree/TreeVertical_R2"
+        page = await self.context.new_page()
         await page.goto(tree_url)
         content = await page.content()
+        await page.close()
+
         soup = BeautifulSoup(content, "html.parser")
         for script in soup.find_all("script"):
-            js_code = script.get_text()  # 반드시 get_text() 사용!
+            js_code = script.get_text()
             if js_code and "d.add(" in js_code:
                 return js_code
-        await page.close()
         return None
 
     @staticmethod

@@ -1,7 +1,9 @@
 python -m ensurepip --upgrade
+
 python -m pip install uv
 
 -- 실행 예시
+uv run uvicorn app.main_api:app --host 0.0.0.0 --port 8080 
 uvicorn main_api:app --host 0.0.0.0 --port 8080 
 ### --reload 옵션 사용 시 컨테이너로 실행된 CDP headless 호출 불가
 

@@ -24,7 +24,7 @@ services:
       - GROUPWARE_DOMAIN=https://ekp.brycenkorea.co.kr:1212
       - LOGIN_ID=bc.mun
       - LOGIN_PW=attendanceT2@
-      - BACKEND_DOMAIN=http://attendance_back:8080
+      - BACKEND_DOMAIN=http://localhost:8080
       - TOKEN=01QWI6OUT42U8
       - TZ=Asia/Seoul
     ports:

@@ -2,47 +2,62 @@ import os
 from bs4 import BeautifulSoup
 import re
 from loguru import logger
-from app.crawler.base import BaseCrawler
+
+from app.core.server import BaseCrawler
 
 
 class AttendanceCrawler(BaseCrawler):
-    def __init__(self, login_info: dict):
-        super().__init__(login_info)
+    def __init__(self, login_url: str, username: str, password: str, cookies: list = None):
+        super().__init__(login_url, username, password, cookies)
 
-    async def run_attendance(self):
-        await self.setup_driver()
+    async def fetch_attendance(self, groupware_domain: str):
+        # 1. 쿠키가 없으면(최초 요청) 로그인을 수행
+        if not self.cookies:
+            success, new_cookies = await self.login()
+            if not success:
+                return {"status": "fail", "message": "로그인 실패", "data": None}
+            # 로그인 성공 시 추출한 쿠키를 현재 객체에 저장
+            self.cookies = new_cookies
+
+        # 2. 근태 페이지 이동 및 HTML 추출
+        soup = await self.get_attendance_table_html(groupware_domain)
+        if not soup:
+            return {"status": "fail", "message": "근태 데이터(테이블) 없음", "data": None}
+
+        # 3. 데이터 파싱
+        daily_results = self.parse_attendance_table_dynamic(soup)
+        mapped_rows = self.map_attendance_keys(daily_results)
+        team_grouped = self.group_by_team(mapped_rows)
+
+        return {
+            "status": "success",
+            "message": "조회 성공",
+            "data": team_grouped,
+            "cookies": self.cookies  # 갱신/유지된 쿠키 반환
+        }
+
+    async def get_attendance_table_html(self, groupware_domain: str):
         try:
-            login_ok = await self.login()
-            if not login_ok:
-                return {"summary": "로그인 실패"}
+            attendance_url = f"{groupware_domain}/AttendR2/AttendRegist"
 
-            soup = await self.get_attendance_table_html()
-            if not soup:
-                return {"summary": "근태 데이터 없음"}
-            daily_results = self.parse_attendance_table_dynamic(soup)
-            mapped_rows = self.map_attendance_keys(daily_results)
-            team_grouped = self.group_by_team(mapped_rows)
-            return team_grouped
-        finally:
-            await self.close()
+            # 페이지 이동 (쿠키가 유효하다면 로그인 화면을 거치지 않고 바로 진입됨)
+            response = await self.page.goto(attendance_url)
 
-    async def get_attendance_table_html(self):
-        """
-        frame: Playwright에서 얻은 Frame 객체 (AspFile 등)
-        반환: BeautifulSoup 객체 (table 파싱용)
-        """
+            # 만약 세션이 만료되어 로그인 페이지로 리다이렉트 되었다면?
+            if "login" in self.page.url.lower():
+                logger.warning("세션이 만료되어 로그인 페이지로 리다이렉트 되었습니다. 재로그인 시도...")
+                success, self.cookies = await self.login()
+                if not success: return None
+                await self.page.goto(attendance_url)
 
-        try:
-            attendance_url = os.environ["GROUPWARE_DOMAIN"] + "/AttendR2/AttendRegist"
-            await self.page.goto(attendance_url)
-            # table id로 바로 찾기
             table = await self.page.query_selector('#objTblBody')
             if not table:
                 logger.error('[ERROR] 출석 테이블(#objTblBody) 없음')
                 return None
+
             html = await table.inner_html()
-            soup = BeautifulSoup(f"<table>{html}</table>", "html.parser")  # tbody만 나올 수 있어 감싸줌
-            return soup
+            return BeautifulSoup(f"<table>{html}</table>", "html.parser")
+
         except Exception as e:
             logger.error(f"[ERROR] table 크롤링 실패: {e}")
             return None
