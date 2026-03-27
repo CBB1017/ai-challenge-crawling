@@ -5,8 +5,7 @@ from loguru import logger
 from bs4 import BeautifulSoup
 import asyncio
 
-from app.core.server import BaseCrawler
-
+from app.crawler.base import BaseCrawler
 
 class MemberCrawler(BaseCrawler):
     def __init__(self, login_url: str, username: str, password: str, cookies: list = None):

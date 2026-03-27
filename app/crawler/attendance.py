@@ -1,10 +1,8 @@
-import os
 from bs4 import BeautifulSoup
 import re
 from loguru import logger
 
-from app.core.server import BaseCrawler
-
+from app.crawler.base import BaseCrawler
 
 class AttendanceCrawler(BaseCrawler):
     def __init__(self, login_url: str, username: str, password: str, cookies: list = None):

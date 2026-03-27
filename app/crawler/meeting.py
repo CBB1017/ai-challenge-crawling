@@ -2,8 +2,8 @@ import re
 import os
 from loguru import logger
 from bs4 import BeautifulSoup
-from app.core.server import BaseCrawler
 
+from app.crawler.base import BaseCrawler
 
 class MeetingRoomCrawler(BaseCrawler):
     def __init__(self, login_url: str, username: str, password: str, cookies: list = None):

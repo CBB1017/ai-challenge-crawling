@@ -1,7 +1,6 @@
 import math
 from typing import Optional, List, Dict, Any, Tuple
 
-
 class OvertimeCalculator:
     def __init__(self):
         self.standard_work_minutes = 480  # 8시간 = 480분
