@@ -1,18 +1,22 @@
 import asyncio
 import json
 from datetime import datetime, date
+from typing import Any
 
 from dotenv import load_dotenv
+from loguru import logger
 from mcp.server.fastmcp import FastMCP
 
 from app.core.config import LOGIN_INFO
 from app.core.scheduler import is_weekend, is_holiday, annotate_member_status, all_checked_in, should_reset_today, \
     calculate_dynamic_schedule_times
+from app.crawler.approval import ApprovalCrawler
 from app.crawler.attendance import AttendanceCrawler
 from app.crawler.base import BaseCrawler
 from app.crawler.meeting import MeetingRoomCrawler
 from app.crawler.member import MemberCrawler
 from app.crawler.overtime import OvertimeCalculator
+from app.models.models import OvertimeRequestModel
 from app.session.session_manage_decorator import requires_groupware_login
 
 load_dotenv()
@@ -140,3 +144,69 @@ async def process_attendance_and_get_schedules(
     }
 
     return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool()
+@requires_groupware_login
+async def request_overtime_approval(
+    target_user_name: str = "",
+    dept_name: str = "",
+    doc_type: str = "OT",
+    ot_date: str = "",
+    memo: str = ".",
+    action_type: str = "T",
+    **kwargs
+) -> str:
+    """
+        근태 기록을 기반으로 잔업/특근 신청서를 자동 작성하고 임시저장/상신합니다.
+
+        Args:
+            target_user_name: OT 대상자 이름 (미입력 시 본인)
+            dept_name: 결재라인 부서명 (예: DX사업부)
+            doc_type: 결재 양식 종류 (기본: OT)
+            ot_date: OT 일자 (YYYY-MM-DD, 미입력 시 오늘)
+            memo: 연장근로 사유 (기본: .)
+            action_type: T(임시저장), F(결재상신)
+        """
+    async with semaphore:
+        cookies = kwargs.get('cookies')
+        actual_user_name = target_user_name or "문병찬"
+        actual_dept_name = dept_name or  "DX사업부"
+        async with ApprovalCrawler(cookies=cookies) as crawler:
+            # 1. 근태 검증 및 폼 세팅
+            result = await crawler.process_overtime_request(
+                target_user_name=actual_user_name,
+                dept_name=actual_dept_name,
+                doc_type=doc_type,
+                ot_date=ot_date,
+                memo=memo
+            )
+
+            # 3. 폼 세팅 성공 시 최종 액션(상신/저장) 수행
+            if result.get("status") == "success":
+                # [추가] 브라우저 Confirm/Alert 창 자동 수락 설정
+                # "저장하시겠습니까?" 또는 "상신하시겠습니까?" 창이 뜨면 자동으로 '확인' 클릭
+                crawler.page.on("dialog", lambda dialog: asyncio.create_task(dialog.accept()))
+                # 부모 페이지의 SendFlowData 함수 호출
+                await crawler.page.evaluate(f"SendFlowData('{action_type}')")
+                # 3. 네트워크 유휴 상태 및 페이지 전환 대기
+                # 상신 후에는 목록 페이지 등으로 이동하므로 기다려줘야 안전합니다.
+                try:
+                    await crawler.page.wait_for_load_state("load", timeout=10000)
+                except Exception as e:
+                    logger.warning(f"페이지 전환 대기 중 타임아웃 발생: {e}")
+
+                # 4. 리다이렉트 URL 검증 로직 적용
+                final_url = crawler.page.url
+                # 보통 상신 후에는 목록(Form_List)이나 보관함으로 이동합니다.
+                if "Form_List" in final_url or "Doc_View" in final_url or "Main" in final_url:
+                    logger.info(f"성공적으로 리다이렉트 되었습니다. 현재 URL: {final_url}")
+                    action_name = "결재상신" if action_type == "F" else "임시저장"
+                    result["message"] = f"{actual_user_name}님의 OT 신청 {action_name} 완료 및 페이지 이동 확인"
+                else:
+                    # URL이 그대로라면 상신 실패(유효성 검사 걸림 등)일 확률이 높습니다.
+                    logger.error(f"페이지가 이동하지 않았습니다. 상신 실패 의심. 현재 URL: {final_url}")
+                    result["status"] = "fail"
+                    result["message"] = "페이지 이동이 확인되지 않았습니다. 그룹웨어의 알림 메시지를 확인해주세요."
+
+            return json.dumps(result, ensure_ascii=False)

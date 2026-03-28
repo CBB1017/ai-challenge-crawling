@@ -34,6 +34,10 @@ def requires_groupware_login(func):
 
         # 3. 확보된 쿠키를 kwargs에 주입하여 원래 함수 실행
         kwargs['cookies'] = cached_cookies
+        # 첫 번째 인자가 OvertimeRequestModel 객체인 경우 해당 객체에 직접 주입
+        if args and hasattr(args[0], 'cookies'):
+            args[0].cookies = cached_cookies
+
         return await func(*args, **kwargs)
 
     return wrapper

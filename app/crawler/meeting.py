@@ -45,7 +45,6 @@ class MeetingRoomCrawler(BaseCrawler):
             html = await table_element.inner_html()
             parsed_data = self.parse_meeting_room_table(f"<table>{html}</table>")
 
-            # 💡 추천 로직: room_name 파라미터가 들어왔을 때만 필터링
             if room_name:
                 parsed_data = [room for room in parsed_data if room_name in room["회의실명"]]
 
