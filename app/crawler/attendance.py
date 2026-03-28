@@ -1,54 +1,138 @@
+import asyncio
+from datetime import date
+from typing import Any
+
 from bs4 import BeautifulSoup
 import re
 from loguru import logger
 
 from app.crawler.base import BaseCrawler
 
+# 부서명과 별칭들을 하나의 튜플로 묶어서 관리합니다.
+DEPT_MAP_CONFIG = [
+    {"code": "9", "names": ("DX사업부", "디엑스사업부", "dx본부")},
+    {"code": "17", "names": ("DX 1Team", "DX1팀", "디엑스1팀", "1팀")},
+    {"code": "29", "names": ("DX 2Team", "DX2팀", "디엑스2팀", "2팀")},
+    {"code": "32", "names": ("DX 3Team", "DX3팀", "디엑스3팀", "3팀")},
+    {"code": "33", "names": ("DX 4Team", "DX4팀", "디엑스4팀", "4팀")},
+    {"code": "30", "names": ("Design Team", "디자인팀", "디자인", "design")},
+    {"code": "34", "names": ("서비스기획팀", "서비스기획팀", "기획", "서비스")},
+    {"code": "31", "names": ("AI사업부", "AI", "AI사업", "에이아이")},
+]
+
+
+def find_dept_code(user_input: str) -> None | str | tuple[str, str, str] | Any:
+    if not user_input:
+        return None
+
+    clean_input = user_input.replace(" ", "").lower()
+
+    # --- 1단계: 완전 일치 우선 검색 (이건 그대로 유지) ---
+    for dept in DEPT_MAP_CONFIG:
+        for alias in dept["names"]:
+            if clean_input == alias.replace(" ", "").lower():
+                return dept["code"]
+
+    # --- 2단계: 부분 일치 (긴 이름부터 검사하여 '가로채기' 방지) ---
+    # 모든 별칭을 (이름, 코드) 튜플 리스트로 평탄화한 뒤, 이름이 긴 순서대로 정렬합니다.
+    all_aliases = []
+    for dept in DEPT_MAP_CONFIG:
+        for alias in dept["names"]:
+            all_aliases.append((alias.replace(" ", "").lower(), dept["code"]))
+
+    # 이름 길이 기준 내림차순 정렬 (예: 'dx2team'이 'dx'보다 먼저 검사됨)
+    all_aliases.sort(key=lambda x: len(x[0]), reverse=True)
+
+    for alias_name, code in all_aliases:
+        # 입력값이 별칭에 포함되거나, 별칭이 입력값에 포함되는지 확인
+        if clean_input in alias_name or alias_name in clean_input:
+            return code
+
+    return None
 class AttendanceCrawler(BaseCrawler):
     def __init__(self, login_url: str, username: str, password: str, cookies: list = None):
         super().__init__(login_url, username, password, cookies)
 
-    async def fetch_attendance(self, groupware_domain: str):
-        # 1. 쿠키가 없으면(최초 요청) 로그인을 수행
+    async def fetch_attendance(self, groupware_domain: str, ot_date: str = None, dept_name: str = None):
+        # 1. 필수 파라미터 체크
+        if not dept_name:
+            raise ValueError("부서명(dept_name)은 필수 입력 항목입니다.")
+        logger.info(f"부서 : {dept_name}, 날짜={ot_date}")
+
+        # 2. 유연한 부서 코드 검색
+        org_code = find_dept_code(dept_name)
+
+        if not org_code:
+            logger.error(f"부서를 찾을 수 없음: {dept_name}")
+            return {"status": "fail", "message": f"'{dept_name}'에 해당하는 부서를 찾을 수 없습니다.", "data": None}
+
+        # 3. 날짜 설정 (없으면 오늘)
+        target_date = ot_date if ot_date else date.today().isoformat()
+
+        logger.info(f"조회 시작: 부서={dept_name}(코드:{org_code}), 날짜={target_date}")
+
+        # 4. 로그인 및 페이지 이동
         if not self.cookies:
             success, new_cookies = await self.login()
-            if not success:
-                return {"status": "fail", "message": "로그인 실패", "data": None}
-            # 로그인 성공 시 추출한 쿠키를 현재 객체에 저장
+            if not success: return {"status": "fail", "message": "로그인 실패", "data": None}
             self.cookies = new_cookies
 
-        # 2. 근태 페이지 이동 및 HTML 추출
-        soup = await self.get_attendance_table_html(groupware_domain)
-        if not soup:
-            return {"status": "fail", "message": "근태 데이터(테이블) 없음", "data": None}
+        soup = await self.get_attendance_table_html(groupware_domain, target_date, org_code)
 
-        # 3. 데이터 파싱
+        if not soup:
+            return {"status": "fail", "message": f"{target_date} / {dept_name} 데이터 없음", "data": None}
+
+        # 6. 데이터 파싱
         daily_results = self.parse_attendance_table_dynamic(soup)
         mapped_rows = self.map_attendance_keys(daily_results)
         team_grouped = self.group_by_team(mapped_rows)
 
         return {
             "status": "success",
-            "message": "조회 성공",
+            "message": f"{target_date} 조회 성공",
             "data": team_grouped,
-            "cookies": self.cookies  # 갱신/유지된 쿠키 반환
+            "cookies": self.cookies
         }
 
-    async def get_attendance_table_html(self, groupware_domain: str):
+
+    async def get_attendance_table_html(self, groupware_domain: str, target_date: str = None, org_code: str = None):
+        """
+        target_date: '2026-03-23' 형식 (None이면 오늘)
+        org_code: '9' (DX사업부), '17' (DX 1Team) 등 (None이면 기본값)
+        """
         try:
             attendance_url = f"{groupware_domain}/AttendR2/AttendRegist"
+            await self.page.goto(attendance_url)
 
-            # 페이지 이동 (쿠키가 유효하다면 로그인 화면을 거치지 않고 바로 진입됨)
-            response = await self.page.goto(attendance_url)
-
-            # 만약 세션이 만료되어 로그인 페이지로 리다이렉트 되었다면?
+            # 1. 세션 체크 및 재로그인
             if "login" in self.page.url.lower():
-                logger.warning("세션이 만료되어 로그인 페이지로 리다이렉트 되었습니다. 재로그인 시도...")
-                success, self.cookies = await self.login()
+                logger.warning("세션 만료. 재로그인 시도...")
+                success, _ = await self.login()
                 if not success: return None
                 await self.page.goto(attendance_url)
+            # 2. 부서(조직) 선택 (org_code가 있을 경우)
+            if org_code:
+                logger.info(f"부서 변경 시도: {org_code}")
+                # select 태그의 value 값을 선택하고 페이지 로딩 대기
+                await asyncio.gather(
+                    self.page.select_option('select[name="LookupOrgCode"]', value=str(org_code)),
+                    self.page.wait_for_load_state("networkidle")
+                )
 
+            # 3. 날짜 변경 로직 (target_date가 있을 경우)
+            if target_date:
+                logger.info(f"날짜 변경 시도: {target_date}")
+                # goToDay 함수 호출 후 페이지 로딩 대기
+                await asyncio.gather(
+                    self.page.evaluate(f"goToDay('{target_date}')"),
+                    self.page.wait_for_load_state("networkidle")
+                )
+
+            # 4. 최종 테이블 데이터 추출
+            # 페이지 로딩 후 테이블이 나타날 때까지 확실히 대기
+            await self.page.wait_for_selector('#objTblBody', timeout=5000)
             table = await self.page.query_selector('#objTblBody')
+
             if not table:
                 logger.error('[ERROR] 출석 테이블(#objTblBody) 없음')
                 return None

@@ -31,8 +31,18 @@ class BaseCrawler:
                     await self.__aexit__(None, None, None)
                     raise
                 await asyncio.sleep(1)
-
         self.context = await self.browser.new_context()
+        # 1. 원격 CDP가 아닌 로컬 브라우저를 강제로 띄웁니다.
+        # self.browser = await self.playwright.chromium.launch(
+        #     headless=False,  # 브라우저 숨김 해제
+        #     slow_mo=1000,  # 마우스/키보드 동작마다 1초씩 대기 (엄청 천천히 움직임)
+        #     channel="chrome",  # PC에 설치된 실제 크롬 브라우저 사용 (호환성 좋음)
+        #     args=["--start-maximized"]  # 창을 최대화해서 띄움
+        # )
+        #
+        # # 2. 창 최대화 유지를 위해 no_viewport 적용
+        # self.context = await self.browser.new_context(no_viewport=True)
+
 
         # 💡 핵심: 전달받은 쿠키가 있다면 컨텍스트에 주입 (로그인 상태 복원)
         if self.cookies:
@@ -47,7 +57,7 @@ class BaseCrawler:
         async def _cleanup():
             if self.page: await self.page.close()
             if self.context: await self.context.close()
-            if self.browser: await self.browser.close()
+            # if self.browser: await self.browser.close()
             if self.playwright: await self.playwright.stop()
 
         try:
@@ -77,7 +87,7 @@ class BaseCrawler:
 
             try:
                 await frame.wait_for_selector('img[src*="btn_logout.gif"]', timeout=5000)
-                logger.info("[INFO] 로그인 성공")
+                logger.info("[INFO] 로그인 되어있음")
 
                 # 로그인 성공 후 세션 쿠키 추출
                 cookies = await self.context.cookies()
@@ -89,3 +99,31 @@ class BaseCrawler:
         except Exception as e:
             logger.error(f"[ERROR] 로그인 실패: {e}")
             return False, []
+
+    async def recover_doc_write_page(self, keyword: str = "Doc_Write", timeout: float = 5.0):
+        import time
+
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            # context 내의 모든 페이지를 역순으로 검사 (보통 최신 페이지가 뒤에 있음)
+            pages = self.context.pages
+            for p in reversed(pages):
+                try:
+                    if p.is_closed():
+                        continue
+
+                    # URL뿐만 아니라 로드 상태도 확인
+                    current_url = p.url
+                    if keyword in current_url:
+                        # 페이지를 활성화하고 self.page 업데이트
+                        self.page = p
+                        await p.bring_to_front()
+                        logger.info(f"Page 복구 완료: {current_url}")
+                        return p
+                except Exception as e:
+                    # 페이지가 검사 도중 닫히는 경우 대비
+                    continue
+
+            await asyncio.sleep(0.5)
+
+        raise Exception(f"'{keyword}' 패턴의 페이지를 찾을 수 없습니다. (현재 페이지 수: {len(self.context.pages)})")

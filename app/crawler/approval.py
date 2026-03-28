@@ -1,8 +1,21 @@
+import asyncio
 import os
 from datetime import datetime
 from loguru import logger
 from app.crawler.attendance import AttendanceCrawler
 from app.crawler.base import BaseCrawler
+
+def normalize_ot_minute(minute_str: str) -> str:
+    """분(minute)을 00 또는 30으로 정규화"""
+    try:
+        m = int(minute_str)
+        if m >= 30:
+            return "30"
+        else:
+            return "00"
+    except (ValueError, TypeError):
+        return "00"
+
 
 
 class ApprovalCrawler(BaseCrawler):
@@ -26,7 +39,11 @@ class ApprovalCrawler(BaseCrawler):
 
         # 근태 크롤러로 해당 유저 데이터 조회
         async with AttendanceCrawler(self.login_url, self.username, self.password, self.cookies) as att_crawler:
-            att_result = await att_crawler.fetch_attendance(groupware_domain)
+            att_result = await att_crawler.fetch_attendance(
+                groupware_domain,
+                ot_date=ot_date,
+                dept_name=dept_name
+            )
 
         if att_result.get("status") != "success":
             return {"status": "fail", "message": "근태 조회 실패"}
@@ -84,8 +101,10 @@ class ApprovalCrawler(BaseCrawler):
         """3. 검증 통과 시 페이지 이동 및 폼 작성"""
         approval_url = f"{groupware_domain}/Flow/Doc_Write?ActionGubun=APPEND&BoxNo=2&DocKind=2&RtnURL=Form_List?gubun=Doc&FormNo=147757&FormType=PH&FormName=3%2E%EC%9E%94%EC%97%85%2F%ED%8A%B9%EA%B7%BC%28OT%29%EC%8B%A0%EC%B2%AD%EC%84%9C"
         await self.page.goto(approval_url)
-
-        await self.set_approval_line(dept_name, doc_type)
+        # 결재선 설정 시도
+        line_success = await self.set_approval_line(dept_name, doc_type)
+        if not line_success:
+            return {"status": "fail", "message": "결재라인 설정 실패로 중단되었습니다."}
 
         # 이미 계산된 시작/종료 시간을 전달하여 중복 조회 방지
         await self.fill_overtime_form(
@@ -95,60 +114,199 @@ class ApprovalCrawler(BaseCrawler):
             ot_date=ot_date,
             memo=memo
         )
-        # 테스트 시 임시저장으로 동작 확인
-        await self.submit_request_via_js("T")
 
         return {"status": "success", "message": "OT 폼 세팅 완료", "cookies": self.cookies}
 
-    async def set_approval_line(self, dept_name: str, doc_type: str):
-        """결재라인 팝업을 열고 동적으로 결재선을 선택 후 적용합니다."""
-        # 영역 열기 체크
-        if await self.page.locator("#trline_on").is_hidden():
-            await self.page.locator("#trline_off img").click()
+    async def set_approval_line(self, dept_name: str, doc_type: str) -> bool:
+        import asyncio
 
-        # 팝업 대기 및 진입
-        async with self.page.expect_popup() as popup_info:
-            await self.page.locator("#trline_on button:has-text('결재라인불러오기')").click()
+        dept_map = {
+            "DX": "DX사업부",
+            "AI": "AI사업부",
+            "이미징": "이미징솔루션그룹",
+            "경영": "경영관리부"
+        }
 
-        popup = await popup_info.value
-        await popup.wait_for_load_state()
+        target_dept = next(
+            (v for k, v in dept_map.items() if k in dept_name.upper()),
+            dept_name
+        )
 
-        # 결재선 매핑 및 클릭
-        line_mapping = {"OT": "근태 관련", "휴가": "근태 관련", "지출결의": "재무 관련"}
-        target_text = f"{dept_name}_{line_mapping.get(doc_type, '기타')}"
+        suffix = "근태" if doc_type in ["OT", "휴가"] else "재무"
+        search_keyword = f"{target_dept}_{suffix}"
 
-        await popup.locator("tr", has_text=target_text).click()
-        await popup.locator("button:has-text('결재라인 사용')").click()
+        try:
+            # 1. 결재라인 영역 펼치기
+            await self.page.evaluate("""
+            () => {
+                const area = document.querySelector("#trline_on");
+                if (area && getComputedStyle(area).display === 'none') {
+                    const img = document.querySelector("img[onclick*='trline']");
+                    if (img) img.click();
+                }
+            }
+            """)
 
-        # 팝업이 닫힐 때까지 대기 (안정성 확보)
-        await popup.wait_for_event("close")
+            await self.page.wait_for_function("""
+            () => {
+                const el = document.querySelector("#trline_on");
+                return el && getComputedStyle(el).display !== 'none';
+            }
+            """, timeout=3000)
 
-    async def fill_overtime_form(self, target_user_name: str, ot_start_hm: str, ot_end_hm: str, ot_date: str = None,
-                                 memo: str = "."):
-        """이미 계산된 시간을 받아 폼만 채우도록 역할 분리"""
+            # 2. popup 열기
+            async with self.page.expect_popup(timeout=7000) as popup_info:
+                await self.page.locator("button[onclick*='LineR2']").click()
+
+            popup = await popup_info.value
+            await popup.wait_for_load_state("domcontentloaded")
+            await popup.wait_for_timeout(1000)
+
+            # 3. popup frame 확인
+            for f in popup.frames:
+                logger.info(f"frame name={f.name}, url={f.url}")
+
+            # 4. RightTop frame 확보 (url 우선)
+            target_frame = next(
+                (f for f in popup.frames if "Line_Top" in f.url),
+                None
+            )
+
+            if not target_frame:
+                target_frame = popup.frame(name="RightTop")
+
+            if not target_frame:
+                logger.error("상단 결재선 프레임을 찾지 못했습니다.")
+                return False
+
+            await target_frame.wait_for_selector("table", timeout=5000)
+
+            # 5. 결재선 row 찾기 (text-is 대신 has-text)
+            row = target_frame.locator(f"tr:has(td:has-text('{search_keyword}'))").first
+
+            await row.wait_for(state="visible", timeout=5000)
+
+            # 6. 우선 click 시도
+            try:
+                await row.click()
+                logger.info(f"결재선 row 클릭 성공: {search_keyword}")
+            except:
+                onclick_script = await row.get_attribute("onclick")
+                if onclick_script:
+                    await target_frame.evaluate(
+                        onclick_script.replace("javascript:", "")
+                    )
+                    logger.info(f"onclick fallback 실행: {search_keyword}")
+
+            await popup.wait_for_load_state("networkidle")
+
+            # 8. alert 자동 승인
+            popup.on(
+                "dialog",
+                lambda d: asyncio.create_task(d.accept())
+            )
+
+            # 9. 결재라인 사용 버튼 클릭
+            use_btn = popup.locator("button:has-text('결재라인 사용')")
+            await use_btn.wait_for(state="visible", timeout=3000)
+
+            # 팝업 닫힘 기다리지 말고 그냥 클릭만 던짐
+            await use_btn.click()
+            logger.info("클릭 완료, 1초 대기 후 강제 복구 시작")
+            await asyncio.sleep(1.0)
+
+            # 10. [핵심] 죽은 자식 버리고 살아있는 부모 찾기
+            # self.page가 죽었을 확률이 높으니 context에서 직접 뒤집니다.
+            found_page = None
+            for p in self.context.pages:
+                try:
+                    # 닫히지 않았고, URL에 'Doc_Write'나 공통 키워드가 포함된 놈 탐색
+                    if not p.is_closed() and ("Doc_Write" in p.url or "main" in p.url):
+                        found_page = p
+                        break
+                except:
+                    continue
+
+            if not found_page:
+                # 그래도 없으면 그냥 닫히지 않은 첫 번째 탭이라도 잡음
+                alive_pages = [p for p in self.context.pages if not p.is_closed()]
+                if alive_pages:
+                    found_page = alive_pages[0]
+
+            if found_page:
+                self.page = found_page
+                # 핵심: 페이지가 완전히 로드(networkidle)될 때까지 대기
+                await self.page.wait_for_load_state("networkidle")
+                await self.page.bring_to_front()
+                logger.info("부모창 복구 및 로딩 완료")
+                return True
+            else:
+                logger.error("살아있는 탭을 하나도 찾지 못했습니다.")
+                return False
+
+        except Exception as e:
+            logger.error(f"결재라인 설정 실패: {e}")
+            return False
+
+    async def fill_overtime_form(
+            self,
+            target_user_name: str,
+            ot_start_hm: str,
+            ot_end_hm: str,
+            ot_date: str = None,
+            memo: str = "."
+    ) -> None:
         if ot_date is None:
             ot_date = datetime.now().strftime("%Y-%m-%d")
 
+        # 시간 분리 및 종료 분 보정
         str_start_h, str_start_m = ot_start_hm.split(":")
         str_end_h, str_end_m = ot_end_hm.split(":")
+        normalized_m = normalize_ot_minute(str_end_m)
 
+        try:
+            await self.page.wait_for_load_state("domcontentloaded", timeout=5000)
+        except:
+            # 만약 페이지 객체가 죽었다면 다시 context에서 가져오기
+            for p in self.context.pages:
+                if not p.is_closed() and "Doc_Write" in p.url:
+                    self.page = p
+                    break
+
+            # 1. iframe 대기 전에 메인 페이지가 살아있는지 확인
+        await self.page.wait_for_selector("#AspFile", timeout=10000)
         frame = self.page.frame_locator("#AspFile")
 
-        await frame.locator('input[name="otDate"]').evaluate(
-            f'(el) => {{ el.value = "{ot_date}"; el.dispatchEvent(new Event("change")); }}'
+        ot_date_input = frame.locator('input[name="otDate"]')
+
+        # 요소가 나타날 때까지 대기 (FrameLocator에 wait_for_selector가 없으므로 이 방식 사용)
+        await ot_date_input.wait_for(state="visible", timeout=5000)
+
+        # 2. 데이터 입력 (evaluate 사용 시 이벤트 디스패치 포함)
+        await ot_date_input.evaluate(
+            f'(el, val) => {{ el.value = val; el.dispatchEvent(new Event("change")); }}',
+            ot_date
         )
+
+        # 3. Select 및 Input 필드 채우기
+        # 루프나 연속적인 locator 호출 시 frame 객체를 재사용합니다.
         await frame.locator('select[name="startH"]').select_option(str_start_h)
         await frame.locator('select[name="startM"]').select_option(str_start_m)
-
-        # 간혹 실제 퇴근시간이 분 단위로 안 떨어질 수 있으므로, select 박스에 있는 근사치(00, 15, 30, 45)로
-        # 내림/올림 처리하는 로직이 필요할 수도 있습니다. (필요시 추가)
         await frame.locator('select[name="endH"]').select_option(str_end_h)
-        await frame.locator('select[name="endM"]').select_option(str_end_m)
 
-        await frame.locator('select[name="otWorkGubun"]').select_option('10')
-        await frame.locator('select[name="LunchYN"]').select_option('O')
-        await frame.locator('select[name="DinnerYN"]').select_option('O')
+        try:
+            await frame.locator('select[name="endM"]').select_option(normalized_m)
+        except Exception as e:
+            logger.warning(f"종료 분({normalized_m}) 선택 실패 → '00' fallback: {e}")
+            await frame.locator('select[name="endM"]').select_option("00")
+
+        # 나머지 옵션 설정
+        await frame.locator('select[name="otWorkGubun"]').select_option("10")
+        await frame.locator('select[name="LunchYN"]').select_option("O")
+        await frame.locator('select[name="DinnerYN"]').select_option("O")
         await frame.locator('textarea[name="memo"]').fill(memo)
+
+        logger.success(f"OT 신청서 작성 완료: {ot_date} {ot_start_hm}~{ot_end_hm}")
 
     async def submit_request_via_js(self, action_type: str = "T"):
         """JS 함수를 직접 실행하여 상신/임시저장 처리"""
@@ -158,7 +316,13 @@ class ApprovalCrawler(BaseCrawler):
             "T" = 임시저장 (테스트)
         """
         # "F"(상신) 또는 "T"(임시저장)
+        self.page.on("dialog", lambda d: asyncio.create_task(d.accept()))
+
         await self.page.evaluate(f"SendFlowData('{action_type}')")
 
         logger.info(f"동작({action_type})이 서버로 전송되었습니다.")
-        await self.page.wait_for_load_state("networkidle")
+
+        try:
+            await self.page.wait_for_load_state("networkidle", timeout=5000)
+        except:
+            pass

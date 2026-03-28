@@ -22,6 +22,13 @@ class OvertimeRequestModel(BaseModel):
         description="OT 대상자 이름 (예: 문병찬). 미입력 시 본인"
     )
 
+    # 'dept', 'department'를 'dept_name'로 매핑
+    dept_name: str = Field(
+        default="",
+        validation_alias=AliasChoices('dept_name', 'dept', 'department', '부서'),
+        description="부서, 부서명, 소속 (예:DX2팀)"
+    )
+
     # 'work_date', 'date'를 'ot_date'로 매핑
     ot_date: str = Field(
         default="",
