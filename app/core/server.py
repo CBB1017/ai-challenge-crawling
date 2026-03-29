@@ -166,64 +166,118 @@ async def process_attendance_and_get_schedules(
 
 # @mcp.tool()
 # @requires_groupware_login
-# async def request_overtime_approval(
-#         request_data: dict, # LLM이 보낸 JSON 데이터를 dict로 받음
+# async def request_overtime_approval_api(
+#         request_data: dict,
 #         **kwargs
 # ) -> str:
-#     # Pydantic 모델로 파싱 및 검증 (Alias, Validator 작동)
-#     data = OvertimeRequestModel(**request_data)
-#     """근태 기록을 기반으로 잔업/특근 신청서를 자동 작성하고 임시저장/상신합니다."""
-#     async with semaphore:
-#         # 1. 사용자 정보 및 날짜 폴백 처리
-#         actual_user = data.target_user_name if data.target_user_name else "문병찬"
-#         actual_dept = data.dept_name if data.dept_name else "DX사업부"
-#         actual_date = data.ot_date if data.ot_date else date.today().isoformat()
-#         logger.debug(f"fetch_attendance 호출됨 - 날짜: {data.ot_date}, 부서: {data.dept_name}")
-#         try:
-#             async with ApprovalCrawler(
-#                     LOGIN_INFO["login_url"], LOGIN_INFO["username"], LOGIN_INFO["password"], kwargs.get('cookies')
-#             ) as crawler:
-#                 result = await crawler.process_overtime_request(
-#                     target_user_name=actual_user,
-#                     dept_name=actual_dept,
-#                     doc_type=data.doc_type,
-#                     ot_date=actual_date,
-#                     memo=data.memo
-#                 )
+#     """
+#     브라우저 UI 조작 대신 직접 POST API를 호출하여 잔업/특근 신청을 처리합니다.
+#     여러 개의 OT 데이터를 한꺼번에 리스트로 받아 처리할 수 있습니다.
+#     """
+#     try:
+#         # 1. 데이터 모델 검증 (리스트 형태의 OT 데이터 지원 가정)
+#         # request_data["ot_items"] 에 여러 건의 OT 정보가 들어있다고 가정합니다.
+#         items = request_data.get("ot_items", [request_data])
+#         target_user = request_data.get("target_user_name", "문병찬")
+#         target_id = request_data.get("target_user_id", "bc.mun")
 #
-#                 # 3. 폼 세팅 성공 시 최종 액션(상신/저장) 수행
-#                 if result.get("status") == "success":
-#                     # [추가] 브라우저 Confirm/Alert 창 자동 수락 설정
-#                     # "저장하시겠습니까?" 또는 "상신하시겠습니까?" 창이 뜨면 자동으로 '확인' 클릭
-#                     crawler.page.on("dialog", lambda dialog: asyncio.create_task(dialog.accept()))
-#                     # 부모 페이지의 SendFlowData 함수 호출
-#                     await crawler.page.evaluate(f"SendFlowData('{data.action_type}')")
-#                     # 3. 네트워크 유휴 상태 및 페이지 전환 대기
-#                     # 상신 후에는 목록 페이지 등으로 이동하므로 기다려줘야 안전합니다.
-#                     try:
-#                         await crawler.page.wait_for_load_state("load", timeout=10000)
-#                     except Exception as e:
-#                         logger.warning(f"페이지 전환 대기 중 타임아웃 발생: {e}")
+#         logger.info(f"API 기반 OT 신청 시작 - 대상: {target_user}, 건수: {len(items)}")
 #
-#                     # 4. 리다이렉트 URL 검증 로직 적용
-#                     final_url = crawler.page.url
-#                     # 보통 상신 후에는 목록(Form_List)이나 보관함으로 이동합니다.
-#                     if "Form_List" in final_url or "Doc_View" in final_url or "Main" in final_url:
-#                         logger.info(f"성공적으로 리다이렉트 되었습니다. 현재 URL: {final_url}")
-#                         action_name = "결재상신" if data.action_type == "F" else "임시저장"
-#                         result["message"] = f"{actual_user}님의 OT 신청 {action_name} 완료 및 페이지 이동 확인"
-#                     else:
-#                         # URL이 그대로라면 상신 실패(유효성 검사 걸림 등)일 확률이 높습니다.
-#                         logger.error(f"페이지가 이동하지 않았습니다. 상신 실패 의심. 현재 URL: {final_url}")
-#                         result["status"] = "fail"
-#                         result["message"] = "페이지 이동이 확인되지 않았습니다. 그룹웨어의 알림 메시지를 확인해주세요."
+#         # 2. Playwright API Request Context 사용
+#         # 기존 Crawler에서 사용하던 쿠키를 그대로 주입합니다.
+#         async with async_playwright() as p:
+#             # 브라우저를 띄우지 않고 요청 컨텍스트만 생성
+#             request_context = await p.request.new_context(
+#                 base_url="https://ekp.brycenkorea.co.kr:1212",
+#                 extra_http_headers={
+#                     "Content-Type": "application/x-www-form-urlencoded",
+#                     "Referer": "https://ekp.brycenkorea.co.kr:1212/AttendR2/FlowForm/doc03_Write",
+#                 },
+#                 storage_state={"cookies": kwargs.get('cookies', [])}
+#             )
 #
-#                 return json.dumps(result, ensure_ascii=False)
-#         except Exception as e:
-#             logger.exception("OT 신청 중 치명적 오류 발생")
-#             return json.dumps({"status": "error", "message": str(e)})
-
-
+#             # 3. 페이로드 구성 (복수 행 처리를 위한 세미콜론 로직)
+#             payload = {
+#                 "argCorpCode": "T06071",
+#                 "argOrgCode": "29",
+#                 "argUserID": target_id,
+#                 "argTimeStamp": str(int(time.time() * 1000000)),
+#                 "argBasicOTStartHM": "00:00",
+#                 "argBasicOTEndHM": "00:00",
+#                 "argStatus": request_data.get("action_type", "F"),  # F: 상신, T: 임시저장
+#                 "txtWhoID": target_id,
+#                 "txtWhoNM": target_user
+#             }
+#
+#             # 리스트 데이터를 세미콜론 문자열로 합치기
+#             arr_fields = {
+#                 "txtWhoIDArr": [], "txtWhoNMArr": [], "otDateArr": [], "otDateToArr": [],
+#                 "startTimeArr": [], "endTimeArr": [], "otWorkGubunArr": [], "otAreaArr": [],
+#                 "memoArr": [], "HoliArr": [], "CustIDArr": [], "EatYNArr": []
+#             }
+#
+#             for item in items:
+#                 arr_fields["txtWhoIDArr"].append(target_id)
+#                 arr_fields["txtWhoNMArr"].append(target_user)
+#                 arr_fields["otDateArr"].append(item.get("ot_date"))
+#                 arr_fields["otDateToArr"].append(item.get("ot_date"))
+#                 arr_fields["startTimeArr"].append(item.get("start_time", "18:30"))
+#                 arr_fields["endTimeArr"].append(item.get("end_time", "20:30"))
+#                 arr_fields["otWorkGubunArr"].append(item.get("doc_type", "14"))
+#                 arr_fields["otAreaArr"].append(item.get("area", "12"))
+#                 arr_fields["memoArr"].append(item.get("memo", "업무 연장"))
+#                 arr_fields["HoliArr"].append(item.get("is_holiday", "N"))
+#                 arr_fields["CustIDArr"].append("")
+#                 # 식사 여부 (점심O+저녁O = 'OO')
+#                 arr_fields["EatYNArr"].append(item.get("eat_yn", "OO"))
+#
+#             # 필드 결합 (마지막에 세미콜론 추가)
+#             for field, values in arr_fields.items():
+#                 payload[field] = ";".join(values) + ";"
+#
+#             # 단일 항목 필드 (리스트의 마지막 항목 기준)
+#             last = items[-1]
+#             payload.update({
+#                 "otDate": last.get("ot_date"),
+#                 "otDateTo": last.get("ot_date"),
+#                 "HoliYN": last.get("is_holiday", "N"),
+#                 "startH": last.get("start_time", "18:30").split(":")[0],
+#                 "startM": last.get("start_time", "18:30").split(":")[1],
+#                 "endH": last.get("end_time", "20:30").split(":")[0],
+#                 "endM": last.get("end_time", "20:30").split(":")[1],
+#                 "otWorkGubun": last.get("doc_type", "14"),
+#                 "otArea": last.get("area", "12"),
+#                 "LunchYN": "O" if "O" in last.get("eat_yn", "OO")[0] else "X",
+#                 "DinnerYN": "O" if "O" in last.get("eat_yn", "OO")[-1] else "X",
+#                 "memo": last.get("memo", "업무 연장")
+#             })
+#
+#             # 4. POST 요청 실행
+#             response = await request_context.post(
+#                 "/AttendR2/FlowForm/doc03_Trans_SavePreChk",
+#                 form=payload
+#             )
+#
+#             # 5. 응답 결과 처리
+#             if response.ok:
+#                 resp_text = await response.text()
+#                 # 서버 응답에 에러 메시지가 포함되어 있는지 확인 (시스템 특성상 200 OK이면서 내부 에러일 수 있음)
+#                 if "error" in resp_text.lower() or "fail" in resp_text.lower():
+#                     return json.dumps({"status": "fail", "message": f"서버 응답 에러: {resp_text}"}, ensure_ascii=False)
+#
+#                 return json.dumps({
+#                     "status": "success",
+#                     "message": f"{target_user}님의 OT 신청({len(items)}건)이 성공적으로 처리되었습니다."
+#                 }, ensure_ascii=False)
+#             else:
+#                 return json.dumps({
+#                     "status": "error",
+#                     "message": f"HTTP 오류: {response.status} {response.status_text}"
+#                 }, ensure_ascii=False)
+#
+#     except Exception as e:
+#         logger.exception("API 기반 OT 신청 중 오류 발생")
+#         return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
 @mcp.tool()
 @requires_groupware_login
 async def request_overtime_approval(
@@ -282,25 +336,41 @@ async def request_overtime_approval(
                     logger.info(f"최종 {action_name} 호출: SendFlowData('{data.action_type}')")
                     await crawler.page.evaluate(f"SendFlowData('{data.action_type}')")
 
-                    # 5. 페이지 전환 및 리다이렉트 대기
+                    # 5. 페이지 전환 및 리다이렉트 대기 (액션별 분기 처리)
                     try:
-                        # 상신 후 목록으로 튕겨나가는 것을 기다림
-                        await crawler.page.wait_for_load_state("networkidle", timeout=10000)
+                        if data.action_type == "F":
+                            # [결재상신] 파라미터 순서 무관하게 필수 키워드 포함 여부 확인
+                            await crawler.page.wait_for_function("""
+                                () => {
+                                    const url = window.location.href;
+                                    return url.includes('/Flow/Doc_List') && 
+                                           url.includes('Sign=F') && 
+                                           url.includes('isTemp=N');
+                                }
+                            """, timeout=15000)
+                        else:
+                            # [임시저장] 임시보관함 목록으로 이동 대기
+                            await crawler.page.wait_for_url("**/Flow/DocBox_List?Gubun=T*", timeout=15000)
                     except Exception as e:
                         logger.warning(f"페이지 전환 대기 중 타임아웃(계속 진행): {e}")
 
                     # 6. 최종 URL 검증
                     final_url = crawler.page.url
+
+                    # 액션 타입에 따른 성공 URL 키워드 설정
+                    is_success = False
+                    if data.action_type == "F" and "Doc_List" in final_url and "Sign=F" in final_url:
+                        is_success = True
+                    elif data.action_type != "F" and "DocBox_List" in final_url and "Gubun=T" in final_url:
+                        is_success = True
+
                     # 'Doc_Write'가 여전히 URL에 있다면 상신 실패(필수값 누락 등) 가능성이 높음
-                    if any(kw in final_url for kw in ["Form_List", "Doc_View", "Main"]):
+                    if is_success:
                         logger.success(f"{action_name} 성공 확인. URL: {final_url}")
                         result["message"] = f"{actual_user}님의 OT 신청 {action_name} 완료"
                     elif "Doc_Write" in final_url:
                         logger.error(f"{action_name} 후에도 작성 페이지에 머물러 있음. 실패 의심.")
                         result.update({"status": "fail", "message": "상신 후 페이지가 이동하지 않았습니다. 필수 항목을 확인해주세요."})
-                    else:
-                        # 알 수 없는 페이지로 이동했더라도 일단 긍정적으로 판단 (이미 닫혔을 수 있음)
-                        result["message"] = f"{actual_user}님의 OT 신청 {action_name} 처리됨 (확인 필요)"
 
                 return json.dumps(result, ensure_ascii=False)
 

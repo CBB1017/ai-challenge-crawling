@@ -1,7 +1,11 @@
 import asyncio
 import os
+import re
+import urllib.parse
 from datetime import datetime
 from loguru import logger
+from playwright.async_api import Page
+
 from app.crawler.attendance import AttendanceCrawler
 from app.crawler.base import BaseCrawler
 
@@ -118,8 +122,6 @@ class ApprovalCrawler(BaseCrawler):
         return {"status": "success", "message": "OT 폼 세팅 완료", "cookies": self.cookies}
 
     async def set_approval_line(self, dept_name: str, doc_type: str) -> bool:
-        import asyncio
-
         dept_map = {
             "DX": "DX사업부",
             "AI": "AI사업부",
@@ -186,7 +188,7 @@ class ApprovalCrawler(BaseCrawler):
 
             await row.wait_for(state="visible", timeout=5000)
 
-            # 6. 우선 click 시도
+            # 6. click 시도
             try:
                 await row.click()
                 logger.info(f"결재선 row 클릭 성공: {search_keyword}")
@@ -197,57 +199,101 @@ class ApprovalCrawler(BaseCrawler):
                         onclick_script.replace("javascript:", "")
                     )
                     logger.info(f"onclick fallback 실행: {search_keyword}")
-
-            await popup.wait_for_load_state("networkidle")
-
-            # 8. alert 자동 승인
-            popup.on(
-                "dialog",
-                lambda d: asyncio.create_task(d.accept())
-            )
-
-            # 9. 결재라인 사용 버튼 클릭
-            use_btn = popup.locator("button:has-text('결재라인 사용')")
-            await use_btn.wait_for(state="visible", timeout=3000)
-
-            # 팝업 닫힘 기다리지 말고 그냥 클릭만 던짐
-            await use_btn.click()
-            logger.info("클릭 완료, 1초 대기 후 강제 복구 시작")
-            await asyncio.sleep(1.0)
-
-            # 10. [핵심] 죽은 자식 버리고 살아있는 부모 찾기
-            # self.page가 죽었을 확률이 높으니 context에서 직접 뒤집니다.
-            found_page = None
-            for p in self.context.pages:
-                try:
-                    # 닫히지 않았고, URL에 'Doc_Write'나 공통 키워드가 포함된 놈 탐색
-                    if not p.is_closed() and ("Doc_Write" in p.url or "main" in p.url):
-                        found_page = p
-                        break
-                except:
-                    continue
-
-            if not found_page:
-                # 그래도 없으면 그냥 닫히지 않은 첫 번째 탭이라도 잡음
-                alive_pages = [p for p in self.context.pages if not p.is_closed()]
-                if alive_pages:
-                    found_page = alive_pages[0]
-
-            if found_page:
-                self.page = found_page
-                # 핵심: 페이지가 완전히 로드(networkidle)될 때까지 대기
-                await self.page.wait_for_load_state("networkidle")
-                await self.page.bring_to_front()
-                logger.info("부모창 복구 및 로딩 완료")
-                return True
-            else:
-                logger.error("살아있는 탭을 하나도 찾지 못했습니다.")
                 return False
 
+            await popup.wait_for_timeout(1000)  # 0.5초에서 1초로 늘려 안정성 확보
+            # -----------------------------------------------------------
+            # 7. [치트키 발동] admin_main.CallLine() 직접 호출 및 에러 추적
+            # -----------------------------5t6------------------------------
+            logger.info("자바스크립트 CallLine() 호출하여 데이터 스틸 시도...")
+
+            # 팝업의 최상위 window에서 원본 JS와 똑같이 실행하며,
+            # 실패할 경우 정확히 "왜" 실패했는지 에러 메시지를 반환합니다.
+            debug_script = """
+                () => {
+                    try {
+                        // 1. 객체 존재 여부 확인
+                        if (!window.admin_main) {
+                            return { status: "fail", msg: "window.admin_main 프레임을 찾을 수 없습니다." };
+                        }
+
+                        // 2. 함수 존재 여부 확인
+                        if (typeof window.admin_main.CallLine !== 'function') {
+                            return { status: "fail", msg: "CallLine이 함수가 아닙니다. 현재 타입: " + typeof window.admin_main.CallLine };
+                        }
+
+                        // 3. 원본과 동일하게 함수 실행!
+                        const result = window.admin_main.CallLine();
+
+                        // 4. 결과값 검증
+                        if (!result || result.trim() === "") {
+                            return { status: "empty", msg: "함수가 실행되었으나 빈 값을 반환했습니다. (결재선 row 클릭이 인식되지 않았을 확률 높음)" };
+                        }
+
+                        return { status: "success", data: result };
+
+                    } catch (e) {
+                        // 내부에서 에러가 터졌을 경우
+                        return { status: "error", msg: "JS 내부 에러 발생: " + e.message };
+                    }
+                }
+                """
+
+            result_obj = await popup.evaluate(debug_script)
+
+            if result_obj["status"] == "success":
+                v_list = result_obj["data"]
+                logger.success(f"데이터 스틸 완벽 성공: {v_list[:50]}...")
+            else:
+                # 여기서 찍히는 로그를 보면 원인을 100% 알 수 있습니다.
+                logger.error(f"CallLine() 실패 상세 원인: {result_obj['msg']}")
+                return False
+
+            # 10. [핵심 1] 팝업 안에서 부모를 건드리지 않고 조용히 닫기만 함!
+            logger.info("데이터 확보 완료. 팝업을 안전하게 종료합니다.")
+            await popup.close()
+
+            # 11. [핵심 2] 부모 창으로 안전하게 복귀
+            await self.page.bring_to_front()
+            logger.success("부모 창 복귀 성공. 셀프 서브밋을 준비합니다.")
+
+            # [핵심] 서브밋을 실행함과 동시에, 서버에서 Doc_Line_View 응답이 올 때까지 기다립니다.
+            # 이렇게 하면 프레임이 깨지든 말든 DOM 에러(Target closed)가 발생하지 않습니다.
+            async with self.page.expect_response(lambda r: "Doc_Line_View" in r.url, timeout=10000):
+                await self.page.evaluate(f"""(val) => {{
+                            const frm = document.d_form;
+                            if (frm) {{
+                                frm.SignList.value = val;
+                                frm.target = 'DocWrite_Line';
+                                frm.action = 'Doc_Line_View?FormNo=147757&NowBuseo=29&SignList=' + encodeURIComponent(val);
+                                frm.submit();
+                            }}
+                        }}""", v_list)
+
+            # 13. 프레임 렌더링 확인
+            logger.info("셀프 서브밋 완료, 프레임 갱신 대기 중...")
+
+            # iframe 내부를 뒤질 필요 없이, 부모 창의 SignList에 값이 잘 들어갔는지만 봅니다.
+            final_signlist = await self.page.locator("input[name='SignList']").get_attribute("value")
+
+            if final_signlist and len(final_signlist) > 10:
+                logger.success("결재라인 폼 반영 완벽하게 완료되었습니다!")
+                return True
+            else:
+                logger.error("서브밋은 되었으나 SignList 값이 비어있습니다.")
+                return False
         except Exception as e:
             logger.error(f"결재라인 설정 실패: {e}")
             return False
 
+    async def debug_frames(self, page: Page):
+        logger.info("--- 현재 활성화된 프레임 목록 ---")
+        for i, frame in enumerate(page.frames):
+            try:
+                logger.debug(f"[{i}] Name: {frame.name}, URL: {frame.url[:50]}")
+            except:
+                logger.debug(f"[{i}] 프레임 정보 읽기 실패 (Closed)")
+        logger.info("------------------------------")
     async def fill_overtime_form(
             self,
             target_user_name: str,
@@ -256,6 +302,8 @@ class ApprovalCrawler(BaseCrawler):
             ot_date: str = None,
             memo: str = "."
     ) -> None:
+        logger.info("--------------fill_overtime_form----------------")
+
         if ot_date is None:
             ot_date = datetime.now().strftime("%Y-%m-%d")
 
@@ -267,6 +315,7 @@ class ApprovalCrawler(BaseCrawler):
         try:
             await self.page.wait_for_load_state("domcontentloaded", timeout=5000)
         except:
+            logger.error("--------------페이지 객체가 죽었다----------------")
             # 만약 페이지 객체가 죽었다면 다시 context에서 가져오기
             for p in self.context.pages:
                 if not p.is_closed() and "Doc_Write" in p.url:

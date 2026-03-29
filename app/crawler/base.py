@@ -21,27 +21,27 @@ class BaseCrawler:
         self.playwright = await async_playwright().start()
         cdp_endpoint = os.environ.get("CDP_ENDPOINT", f"ws://localhost:3001?token={os.environ.get('TOKEN', '')}")
 
-        for attempt in range(3):
-            try:
-                self.browser = await self.playwright.chromium.connect_over_cdp(cdp_endpoint, timeout=10000)
-                break
-            except Exception as e:
-                if attempt == 2:
-                    logger.error(f"CDP 연결 최종 실패: {e}")
-                    await self.__aexit__(None, None, None)
-                    raise
-                await asyncio.sleep(1)
-        self.context = await self.browser.new_context()
-        # 1. 원격 CDP가 아닌 로컬 브라우저를 강제로 띄웁니다.
-        # self.browser = await self.playwright.chromium.launch(
-        #     headless=False,  # 브라우저 숨김 해제
-        #     slow_mo=1000,  # 마우스/키보드 동작마다 1초씩 대기 (엄청 천천히 움직임)
-        #     channel="chrome",  # PC에 설치된 실제 크롬 브라우저 사용 (호환성 좋음)
-        #     args=["--start-maximized"]  # 창을 최대화해서 띄움
-        # )
-        #
-        # # 2. 창 최대화 유지를 위해 no_viewport 적용
-        # self.context = await self.browser.new_context(no_viewport=True)
+        # for attempt in range(3):
+        #     try:
+        #         self.browser = await self.playwright.chromium.connect_over_cdp(cdp_endpoint, timeout=10000)
+        #         break
+        #     except Exception as e:
+        #         if attempt == 2:
+        #             logger.error(f"CDP 연결 최종 실패: {e}")
+        #             await self.__aexit__(None, None, None)
+        #             raise
+        #         await asyncio.sleep(1)
+        # self.context = await self.browser.new_context(service_workers='block')
+        #1. 원격 CDP가 아닌 로컬 브라우저를 강제로 띄웁니다.
+        self.browser = await self.playwright.chromium.launch(
+            headless=False,  # 브라우저 숨김 해제
+            slow_mo=1000,  # 마우스/키보드 동작마다 1초씩 대기 (엄청 천천히 움직임)
+            channel="chrome",  # PC에 설치된 실제 크롬 브라우저 사용 (호환성 좋음)
+            args=["--start-maximized"]  # 창을 최대화해서 띄움
+        )
+
+        # 2. 창 최대화 유지를 위해 no_viewport 적용
+        self.context = await self.browser.new_context(no_viewport=True)
 
 
         # 💡 핵심: 전달받은 쿠키가 있다면 컨텍스트에 주입 (로그인 상태 복원)
@@ -108,6 +108,8 @@ class BaseCrawler:
             # context 내의 모든 페이지를 역순으로 검사 (보통 최신 페이지가 뒤에 있음)
             pages = self.context.pages
             for p in reversed(pages):
+                logger.info(f"Page : {p}")
+
                 try:
                     if p.is_closed():
                         continue
