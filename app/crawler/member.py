@@ -8,17 +8,16 @@ import asyncio
 from app.crawler.base import BaseCrawler
 
 class MemberCrawler(BaseCrawler):
-    def __init__(self, domain: str, username: str, password: str, cookies: list = None):
-        super().__init__(domain, username, password, cookies)
+    def __init__(self, cookies: list = None):
+        super().__init__(cookies)
 
     async def fetch_members(self, groupware_domain: str):
         # 1. 쿠키 확인 및 자동 로그인
         if not self.cookies:
-            success, new_cookies = await self.login()
-            if not success:
-                logger.error("[STEP1] 로그인 실패")
-                return {"status": "fail", "message": "로그인 실패", "data": None}
-            self.cookies = new_cookies
+            # 쿠키가 없으면 무조건 에러를 뱉고 뻗습니다.
+            # 프론트엔드는 이 에러를 받아 사용자를 로그인 창으로 튕겨냅니다.
+            logger.warning("유효한 세션(쿠키)이 없습니다. 프론트엔드 리다이렉트 필요.")
+            return {"status": "fail", "message": "세션이 만료되었습니다. 다시 로그인해주세요.", "code": "SESSION_EXPIRED"}
 
         try:
             logger.info("[STEP2] 조직도/이메일 동시 크롤링 시작")

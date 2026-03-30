@@ -1,3 +1,6 @@
+from typing import Any
+
+import jwt
 from loguru import logger
 
 def format_minutes_to_readable(minutes):
@@ -11,6 +14,17 @@ def format_minutes_to_readable(minutes):
     else:
         return f"{mins}분"
 
+
+async def get_email_from_jwt(access_token: str) -> Any | None:
+    try:
+        # 서명(검증) 과정을 생략하고 데이터만 단순 추출
+        payload = jwt.decode(access_token, options={"verify_signature": False})
+
+        # 이메일 반환 (exp 등 다른 값도 쉽게 추출 가능)
+        return payload.get("email")
+    except jwt.DecodeError:
+        print("유효하지 않은 토큰 형식입니다.")
+        return None
 
 def print_results(overtime_results, total_overtime, minus_consumed, all_entries):
     """개선된 결과 출력 함수"""

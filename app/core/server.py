@@ -5,13 +5,13 @@ from datetime import datetime, date
 
 from dotenv import load_dotenv
 from loguru import logger
-from mcp.server.fastmcp import FastMCP, Context
+from mcp.server.fastmcp import FastMCP
+
 from app.core.config import LOGIN_INFO
 from app.core.scheduler import is_weekend, is_holiday, annotate_member_status, all_checked_in, should_reset_today, \
     calculate_dynamic_schedule_times
 from app.crawler.approval import ApprovalCrawler
 from app.crawler.attendance import AttendanceCrawler
-from app.crawler.base import BaseCrawler
 from app.crawler.meeting import MeetingRoomCrawler
 from app.crawler.member import MemberCrawler
 from app.crawler.overtime import OvertimeCalculator
@@ -29,35 +29,6 @@ current_username = contextvars.ContextVar("current_username", default=None)
 mcp = FastMCP("crawler-server")
 
 @mcp.tool()
-async def perform_login(
-    username: str,
-    password: str,
-) -> str:
-    """대상 시스템에 로그인하고 세션 쿠키를 JSON 형태로 반환합니다."""
-    logger.info("정적 로그인 시도 중...")
-    async with semaphore:
-        try:
-            async with BaseCrawler(username=username, password=password) as crawler:
-                success, cookies, user_info = await crawler.login()
-
-                status = "success" if success else "fail"
-                logger.info(f"로그인 결과: {status}")
-
-                username = user_info.get("username")  # "문병찬"
-                dept = user_info.get("dept")  # "DX 2Team"
-
-                return json.dumps({
-                    "status": status,
-                    "message": "Login successful" if success else "Login failed",
-                    "cookies": cookies,
-                    "user": {"username": username, "dept": dept}
-                })
-        except Exception as e:
-            logger.exception(f"로그인 도중 예외 발생: {e}")
-            return json.dumps({"status": "error", "message": str(e)})
-
-
-@mcp.tool()
 @requires_groupware_login
 async def get_team_attendance(
         ot_date: str,
@@ -65,7 +36,6 @@ async def get_team_attendance(
         **kwargs
 ) -> str:
     """팀 멤버들의 근태 기록을 조회합니다.
-    (이 함수는 별도의 파라미터 입력이 필요하지 않으며, 시스템 설정값을 사용합니다.)
     """
     logger.info("팀 근태 기록 조회 시작")
     logger.debug(f"get_team_attendance 호출됨 - 날짜: {ot_date}, 부서: {dept_name}")
@@ -95,9 +65,7 @@ async def get_meeting_room_status(
     """회의실 예약 현황을 조회합니다."""
     logger.info(f"회의실 조회 요청: {room_name}")
     async with semaphore:
-        async with MeetingRoomCrawler(
-                LOGIN_INFO["domain"], LOGIN_INFO["username"], LOGIN_INFO["password"], kwargs.get('cookies')
-        ) as crawler:
+        async with MeetingRoomCrawler(kwargs.get('cookies')) as crawler:
             result = await crawler.fetch_reservations(LOGIN_INFO["domain"], room_name)
             logger.info(f"'{room_name}' 예약 현황 조회 성공")
             return json.dumps(result, ensure_ascii=False)
@@ -112,15 +80,13 @@ async def get_team_members(
      (이 함수는 별도의 파라미터 입력이 필요하지 않으며, 시스템 설정값을 사용합니다.)
     """
     async with semaphore:
-        async with MemberCrawler(
-                LOGIN_INFO["domain"], LOGIN_INFO["username"], LOGIN_INFO["password"], kwargs.get('cookies')
-        ) as crawler:
+        async with MemberCrawler(kwargs.get('cookies')) as crawler:
             result = await crawler.fetch_members(LOGIN_INFO["domain"])
             return json.dumps(result, ensure_ascii=False)
 
 
 @mcp.tool()
-def calculate_overtime_data(attendance_data: list[dict]) -> str:
+async def calculate_overtime_data(attendance_data: list[dict]) -> str:
     """
     크롤링된 근태 데이터를 기반으로 초과 근무(OT) 및 부족 근무 상쇄 결과를 계산합니다.
     """
@@ -143,9 +109,7 @@ async def process_attendance_and_get_schedules(
     today = date.today()
     mute = is_weekend(today) or is_holiday(today)
     # 1. 크롤링 실행
-    async with AttendanceCrawler(
-            LOGIN_INFO["domain"], LOGIN_INFO["username"], LOGIN_INFO["password"], kwargs.get('cookies')
-    ) as crawler:
+    async with AttendanceCrawler(kwargs.get('cookies')) as crawler:
         data = await crawler.fetch_attendance(LOGIN_INFO["domain"])
 
     if not data:
@@ -185,18 +149,6 @@ async def request_overtime_approval(
     - action_type은 반드시 결재상신이면 'F', 임시저장이면 'T'로 매핑해야 합니다.
     - ot_date는 반드시 'YYYY-MM-DD' 포맷이어야 합니다.
     """
-
-    # ---------------------------------------------------------
-    # 2. 세션 검증 (데코레이터가 하던 역할)
-    # ---------------------------------------------------------
-    cached_cookies = get_session(username)
-    if not cached_cookies:
-        return json.dumps({
-            "status": "error",
-            "code": "SESSION_EXPIRED",
-            "message": "세션이 만료되었습니다. 다시 로그인해주세요."
-        }, ensure_ascii=False)
-
     # 1. Pydantic 모델 파싱 (Alias 및 Validator 적용)
     try:
         data = OvertimeRequestModel(**request_data)
@@ -208,6 +160,18 @@ async def request_overtime_approval(
             "message": "필수 파라미터가 누락되었거나 형식이 틀렸습니다. 시스템 컨텍스트에서 로그인 유저의 부서(dept_name)와 이름(target_user_name)을 확인하여 다시 호출해주세요.",
             "details": str(e)
         }, ensure_ascii=False)
+    # ---------------------------------------------------------
+    # 2. 세션 검증 (데코레이터가 하던 역할)
+    # ---------------------------------------------------------
+    cached_cookies = get_session(data.target_user_id)
+    if not cached_cookies:
+        return json.dumps({
+            "status": "error",
+            "code": "SESSION_EXPIRED",
+            "message": "세션이 만료되었습니다. 다시 로그인해주세요."
+        }, ensure_ascii=False)
+
+
     async with semaphore:
         # 2. 하드코딩된 폴백 제거 -> Pydantic 검증을 통과한 순수 데이터만 사용
         actual_user = data.target_user_name

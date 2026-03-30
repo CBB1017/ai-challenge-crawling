@@ -61,7 +61,7 @@ class BaseCrawler:
         self.browser = await get_shared_cdp_browser()
 
         # 2. 이 요청만을 위한 시크릿 창(컨텍스트) 생성
-        self.context = await self.browser.new_context(service_workers='block')
+        self.context = await self.browser.new_context(service_workers='allow')
         #1. 원격 CDP가 아닌 로컬 브라우저를 강제로 띄웁니다.
         # self.browser = await self.playwright.chromium.launch(
         #     headless=False,  # 브라우저 숨김 해제
@@ -106,14 +106,14 @@ class BaseCrawler:
         """최초 로그인 전용 메서드 (프론트엔드에서 로그인 API 호출 시에만 사용)"""
         if not self.username or not self.password:
             logger.error("[ERROR] 로그인 정보가 제공되지 않았습니다.")
-            return False, [], {}  # 리턴 형식 맞춤
+            return False, [], "", {}
 
         try:
             await self.page.goto(LOGIN_INFO["domain"])
             frame = await self.wait_for_frame(frame_name)
             if not frame:
                 logger.error("[ERROR] 프레임을 찾을 수 없습니다.")
-                return False, [], {}
+                return False, [], "", {}
 
             await frame.fill('input[name="UserID"]', self.username)
             await frame.fill('input[name="UserPass"]', self.password)
@@ -127,7 +127,7 @@ class BaseCrawler:
                 # 2. 이름 및 부서 정보 추출 (HTML 구조 기반)
                 user_info = {"username": "", "dept": ""}
                 try:
-                    # h6 태그의 data-unm 속성에서 정확한 이름 추출 (예: "문병찬")
+                    # h6 컨텐트 정확한 이름+직급 추출 (예: "문병찬 대리")
                     name_locator = frame.locator("h6#loginUserName")
                     user_info["username"] = (await name_locator.text_content()).strip()
 
@@ -136,21 +136,44 @@ class BaseCrawler:
                     user_info["dept"] = (await dept_locator.text_content()).strip()
 
                     logger.info(f"[INFO] 사용자 정보 추출 성공: {user_info['username']} / {user_info['dept']}")
+
+                    access_token = await frame.evaluate("""() => {
+                        return new Promise((resolve) => {
+                            const token = localStorage.getItem('accessToken');
+                            if (token) return resolve(token);
+
+                            // 0.5초마다 확인하는 인터벌
+                            const interval = setInterval(() => {
+                                const t = localStorage.getItem('accessToken');
+                                if (t) {
+                                    clearInterval(interval);
+                                    resolve(t);
+                                }
+                            }, 500);
+                            setTimeout(() => { clearInterval(interval); resolve(null); }, 5000);
+                        });
+                    }""")
+
+                    # 3. 만약 'accessToken'이라는 키가 아니라 다른 키라면 확인 필요
+                    if not access_token:
+                        logger.error("localStorage에서 accessToken을 찾을 수 없습니다.")
+                        return False, [], "", {}
+
+                    # 4. 세션 쿠키 추출
+                    cookies = await self.context.cookies()
                 except Exception as e:
-                    logger.warning(f"[WARNING] 사용자 정보 추출 실패 (진행은 계속함): {e}")
+                    logger.error(f"데이터 추출 중 에러 발생: {e}")
+                    return False, [], "", {}
 
-                # 3. 로그인 성공 후 세션 쿠키 추출
-                cookies = await self.context.cookies()
-
-                # 성공, 쿠키리스트, 유저정보(dict) 반환
-                return True, cookies, user_info
+                # 성공, 쿠키리스트, 토큰, 유저정보(dict) 반환
+                return True, cookies, access_token, user_info
 
             except Exception:
                 logger.error("[ERROR] 로그인 실패 (로그아웃 버튼 없음)")
-                return False, [], {}
+                return False, [], "", {}
         except Exception as e:
             logger.error(f"[ERROR] 로그인 페이지 접근 실패: {e}")
-            return False, [], {}
+            return False, [], "", {}
 
     async def recover_doc_write_page(self, keyword: str = "Doc_Write", timeout: float = 5.0):
         import time
