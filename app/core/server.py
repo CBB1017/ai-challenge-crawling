@@ -1,12 +1,11 @@
 import asyncio
+import contextvars
 import json
 from datetime import datetime, date
-from typing import Any
 
 from dotenv import load_dotenv
 from loguru import logger
-from mcp.server.fastmcp import FastMCP
-
+from mcp.server.fastmcp import FastMCP, Context
 from app.core.config import LOGIN_INFO
 from app.core.scheduler import is_weekend, is_holiday, annotate_member_status, all_checked_in, should_reset_today, \
     calculate_dynamic_schedule_times
@@ -18,34 +17,40 @@ from app.crawler.member import MemberCrawler
 from app.crawler.overtime import OvertimeCalculator
 from app.models.models import OvertimeRequestModel
 from app.session.session_manage_decorator import requires_groupware_login
+from app.session.session_manager import get_session
 
 load_dotenv()
 
 # --- 2. MCP 서버 및 동시성 제어 설정 ---
 MAX_CONCURRENT_TASKS = 5  # 최대 병렬 실행 갯수 제한
 semaphore = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
-
+# 현재 비동기 요청(Request) 흐름 내에서만 유지
+current_username = contextvars.ContextVar("current_username", default=None)
 mcp = FastMCP("crawler-server")
 
-
 @mcp.tool()
-async def perform_login() -> str:
+async def perform_login(
+    username: str,
+    password: str,
+) -> str:
     """대상 시스템에 로그인하고 세션 쿠키를 JSON 형태로 반환합니다."""
     logger.info("정적 로그인 시도 중...")
     async with semaphore:
         try:
-            async with BaseCrawler(
-                    LOGIN_INFO["login_url"], LOGIN_INFO["username"], LOGIN_INFO["password"]
-            ) as crawler:
-                success, cookies = await crawler.login()
+            async with BaseCrawler(username=username, password=password) as crawler:
+                success, cookies, user_info = await crawler.login()
 
                 status = "success" if success else "fail"
                 logger.info(f"로그인 결과: {status}")
 
+                username = user_info.get("username")  # "문병찬"
+                dept = user_info.get("dept")  # "DX 2Team"
+
                 return json.dumps({
                     "status": status,
                     "message": "Login successful" if success else "Login failed",
-                    "cookies": cookies
+                    "cookies": cookies,
+                    "user": {"username": username, "dept": dept}
                 })
         except Exception as e:
             logger.exception(f"로그인 도중 예외 발생: {e}")
@@ -66,13 +71,11 @@ async def get_team_attendance(
     logger.debug(f"get_team_attendance 호출됨 - 날짜: {ot_date}, 부서: {dept_name}")
 
     async with semaphore:
-        async with AttendanceCrawler(
-                LOGIN_INFO["login_url"], LOGIN_INFO["username"], LOGIN_INFO["password"], kwargs.get('cookies')
-        ) as crawler:
+        async with AttendanceCrawler(kwargs.get('cookies')) as crawler:
             try:
                 target_date = ot_date if ot_date else date.today().isoformat()
                 result = await crawler.fetch_attendance(
-                    groupware_domain=LOGIN_INFO["login_url"],
+                    groupware_domain=LOGIN_INFO["domain"],
                     ot_date=target_date,
                     dept_name=dept_name
                 )
@@ -93,9 +96,9 @@ async def get_meeting_room_status(
     logger.info(f"회의실 조회 요청: {room_name}")
     async with semaphore:
         async with MeetingRoomCrawler(
-                LOGIN_INFO["login_url"], LOGIN_INFO["username"], LOGIN_INFO["password"], kwargs.get('cookies')
+                LOGIN_INFO["domain"], LOGIN_INFO["username"], LOGIN_INFO["password"], kwargs.get('cookies')
         ) as crawler:
-            result = await crawler.fetch_reservations(LOGIN_INFO["login_url"], room_name)
+            result = await crawler.fetch_reservations(LOGIN_INFO["domain"], room_name)
             logger.info(f"'{room_name}' 예약 현황 조회 성공")
             return json.dumps(result, ensure_ascii=False)
 
@@ -110,9 +113,9 @@ async def get_team_members(
     """
     async with semaphore:
         async with MemberCrawler(
-                LOGIN_INFO["login_url"], LOGIN_INFO["username"], LOGIN_INFO["password"], kwargs.get('cookies')
+                LOGIN_INFO["domain"], LOGIN_INFO["username"], LOGIN_INFO["password"], kwargs.get('cookies')
         ) as crawler:
-            result = await crawler.fetch_members(LOGIN_INFO["login_url"])
+            result = await crawler.fetch_members(LOGIN_INFO["domain"])
             return json.dumps(result, ensure_ascii=False)
 
 
@@ -141,9 +144,9 @@ async def process_attendance_and_get_schedules(
     mute = is_weekend(today) or is_holiday(today)
     # 1. 크롤링 실행
     async with AttendanceCrawler(
-            LOGIN_INFO["login_url"], LOGIN_INFO["username"], LOGIN_INFO["password"], kwargs.get('cookies')
+            LOGIN_INFO["domain"], LOGIN_INFO["username"], LOGIN_INFO["password"], kwargs.get('cookies')
     ) as crawler:
-        data = await crawler.fetch_attendance(LOGIN_INFO["login_url"])
+        data = await crawler.fetch_attendance(LOGIN_INFO["domain"])
 
     if not data:
         return json.dumps({"status": "fail", "message": "데이터 없음"})
@@ -164,150 +167,56 @@ async def process_attendance_and_get_schedules(
 
     return json.dumps(result, ensure_ascii=False)
 
-# @mcp.tool()
-# @requires_groupware_login
-# async def request_overtime_approval_api(
-#         request_data: dict,
-#         **kwargs
-# ) -> str:
-#     """
-#     브라우저 UI 조작 대신 직접 POST API를 호출하여 잔업/특근 신청을 처리합니다.
-#     여러 개의 OT 데이터를 한꺼번에 리스트로 받아 처리할 수 있습니다.
-#     """
-#     try:
-#         # 1. 데이터 모델 검증 (리스트 형태의 OT 데이터 지원 가정)
-#         # request_data["ot_items"] 에 여러 건의 OT 정보가 들어있다고 가정합니다.
-#         items = request_data.get("ot_items", [request_data])
-#         target_user = request_data.get("target_user_name", "문병찬")
-#         target_id = request_data.get("target_user_id", "bc.mun")
-#
-#         logger.info(f"API 기반 OT 신청 시작 - 대상: {target_user}, 건수: {len(items)}")
-#
-#         # 2. Playwright API Request Context 사용
-#         # 기존 Crawler에서 사용하던 쿠키를 그대로 주입합니다.
-#         async with async_playwright() as p:
-#             # 브라우저를 띄우지 않고 요청 컨텍스트만 생성
-#             request_context = await p.request.new_context(
-#                 base_url="https://ekp.brycenkorea.co.kr:1212",
-#                 extra_http_headers={
-#                     "Content-Type": "application/x-www-form-urlencoded",
-#                     "Referer": "https://ekp.brycenkorea.co.kr:1212/AttendR2/FlowForm/doc03_Write",
-#                 },
-#                 storage_state={"cookies": kwargs.get('cookies', [])}
-#             )
-#
-#             # 3. 페이로드 구성 (복수 행 처리를 위한 세미콜론 로직)
-#             payload = {
-#                 "argCorpCode": "T06071",
-#                 "argOrgCode": "29",
-#                 "argUserID": target_id,
-#                 "argTimeStamp": str(int(time.time() * 1000000)),
-#                 "argBasicOTStartHM": "00:00",
-#                 "argBasicOTEndHM": "00:00",
-#                 "argStatus": request_data.get("action_type", "F"),  # F: 상신, T: 임시저장
-#                 "txtWhoID": target_id,
-#                 "txtWhoNM": target_user
-#             }
-#
-#             # 리스트 데이터를 세미콜론 문자열로 합치기
-#             arr_fields = {
-#                 "txtWhoIDArr": [], "txtWhoNMArr": [], "otDateArr": [], "otDateToArr": [],
-#                 "startTimeArr": [], "endTimeArr": [], "otWorkGubunArr": [], "otAreaArr": [],
-#                 "memoArr": [], "HoliArr": [], "CustIDArr": [], "EatYNArr": []
-#             }
-#
-#             for item in items:
-#                 arr_fields["txtWhoIDArr"].append(target_id)
-#                 arr_fields["txtWhoNMArr"].append(target_user)
-#                 arr_fields["otDateArr"].append(item.get("ot_date"))
-#                 arr_fields["otDateToArr"].append(item.get("ot_date"))
-#                 arr_fields["startTimeArr"].append(item.get("start_time", "18:30"))
-#                 arr_fields["endTimeArr"].append(item.get("end_time", "20:30"))
-#                 arr_fields["otWorkGubunArr"].append(item.get("doc_type", "14"))
-#                 arr_fields["otAreaArr"].append(item.get("area", "12"))
-#                 arr_fields["memoArr"].append(item.get("memo", "업무 연장"))
-#                 arr_fields["HoliArr"].append(item.get("is_holiday", "N"))
-#                 arr_fields["CustIDArr"].append("")
-#                 # 식사 여부 (점심O+저녁O = 'OO')
-#                 arr_fields["EatYNArr"].append(item.get("eat_yn", "OO"))
-#
-#             # 필드 결합 (마지막에 세미콜론 추가)
-#             for field, values in arr_fields.items():
-#                 payload[field] = ";".join(values) + ";"
-#
-#             # 단일 항목 필드 (리스트의 마지막 항목 기준)
-#             last = items[-1]
-#             payload.update({
-#                 "otDate": last.get("ot_date"),
-#                 "otDateTo": last.get("ot_date"),
-#                 "HoliYN": last.get("is_holiday", "N"),
-#                 "startH": last.get("start_time", "18:30").split(":")[0],
-#                 "startM": last.get("start_time", "18:30").split(":")[1],
-#                 "endH": last.get("end_time", "20:30").split(":")[0],
-#                 "endM": last.get("end_time", "20:30").split(":")[1],
-#                 "otWorkGubun": last.get("doc_type", "14"),
-#                 "otArea": last.get("area", "12"),
-#                 "LunchYN": "O" if "O" in last.get("eat_yn", "OO")[0] else "X",
-#                 "DinnerYN": "O" if "O" in last.get("eat_yn", "OO")[-1] else "X",
-#                 "memo": last.get("memo", "업무 연장")
-#             })
-#
-#             # 4. POST 요청 실행
-#             response = await request_context.post(
-#                 "/AttendR2/FlowForm/doc03_Trans_SavePreChk",
-#                 form=payload
-#             )
-#
-#             # 5. 응답 결과 처리
-#             if response.ok:
-#                 resp_text = await response.text()
-#                 # 서버 응답에 에러 메시지가 포함되어 있는지 확인 (시스템 특성상 200 OK이면서 내부 에러일 수 있음)
-#                 if "error" in resp_text.lower() or "fail" in resp_text.lower():
-#                     return json.dumps({"status": "fail", "message": f"서버 응답 에러: {resp_text}"}, ensure_ascii=False)
-#
-#                 return json.dumps({
-#                     "status": "success",
-#                     "message": f"{target_user}님의 OT 신청({len(items)}건)이 성공적으로 처리되었습니다."
-#                 }, ensure_ascii=False)
-#             else:
-#                 return json.dumps({
-#                     "status": "error",
-#                     "message": f"HTTP 오류: {response.status} {response.status_text}"
-#                 }, ensure_ascii=False)
-#
-#     except Exception as e:
-#         logger.exception("API 기반 OT 신청 중 오류 발생")
-#         return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
 @mcp.tool()
-@requires_groupware_login
 async def request_overtime_approval(
         request_data: dict,
         **kwargs
 ) -> str:
     """
-    perform_login은 먼저 수행하지 않아도 됩니다.
-    잔업/특근 신청서를 자동 작성하고 임시저장/상신합니다.
+    그룹웨어에서 잔업(OT) 또는 특근 신청서를 자동으로 작성하고 임시저장하거나 결재를 상신합니다.
+
+    [사용 시기]
+    - 사용자가 "잔업 신청해줘", "특근 올려줘", "주말 근무 상신해", "OT 올려줘", "초과근무 올려줘", "야근 올려줘" 등의 요청을 할 때 호출합니다.
+    - 일반 휴가, 연차, 출장 신청에는 이 툴을 사용하지 마세요.
+
+    [주의 사항]
+    - perform_login 툴을 먼저 호출할 필요가 없습니다. (내부에서 처리됨)
+    - target_user_name과 dept_name은 시스템 컨텍스트의 로그인 유저 정보를 사용하세요.
+    - action_type은 반드시 결재상신이면 'F', 임시저장이면 'T'로 매핑해야 합니다.
+    - ot_date는 반드시 'YYYY-MM-DD' 포맷이어야 합니다.
     """
+
+    # ---------------------------------------------------------
+    # 2. 세션 검증 (데코레이터가 하던 역할)
+    # ---------------------------------------------------------
+    cached_cookies = get_session(username)
+    if not cached_cookies:
+        return json.dumps({
+            "status": "error",
+            "code": "SESSION_EXPIRED",
+            "message": "세션이 만료되었습니다. 다시 로그인해주세요."
+        }, ensure_ascii=False)
 
     # 1. Pydantic 모델 파싱 (Alias 및 Validator 적용)
     try:
         data = OvertimeRequestModel(**request_data)
     except Exception as e:
-        logger.error(f"데이터 파싱 에러: {e}")
-        return json.dumps({"status": "error", "message": f"입력 데이터 형식이 잘못되었습니다: {e}"})
-
+        logger.error(f"데이터 파싱 에러(LLM 파라미터 누락): {str(e)}")
+        # LLM에게 어떤 필드가 누락되었는지 피드백을 주어 스스로 수정하게 유도
+        return json.dumps({
+            "status": "error",
+            "message": "필수 파라미터가 누락되었거나 형식이 틀렸습니다. 시스템 컨텍스트에서 로그인 유저의 부서(dept_name)와 이름(target_user_name)을 확인하여 다시 호출해주세요.",
+            "details": str(e)
+        }, ensure_ascii=False)
     async with semaphore:
-        # 2. 기본값 폴백 (Model에서 설정되지 않은 경우 대비)
-        actual_user = data.target_user_name or "문병찬"
-        actual_dept = data.dept_name or "DX사업부"
-        actual_date = data.ot_date or date.today().isoformat()
+        # 2. 하드코딩된 폴백 제거 -> Pydantic 검증을 통과한 순수 데이터만 사용
+        actual_user = data.target_user_name
+        actual_dept = data.dept_name
+        actual_date = data.ot_date
 
-        logger.info(f"OT 신청 시작 - 대상: {data.target_user_name}, 부서: {data.dept_name}, 날짜: {data.ot_date}")
-
+        logger.info(f"OT 신청 시작 - 대상: {actual_user}, 부서: {actual_dept}, 날짜: {actual_date}, 액션: {data.action_type}")
         try:
-            async with ApprovalCrawler(
-                    LOGIN_INFO["login_url"], LOGIN_INFO["username"], LOGIN_INFO["password"], kwargs.get('cookies')
-            ) as crawler:
+            async with ApprovalCrawler(kwargs.get('cookies')) as crawler:
                 # 3. 폼 작성 및 결재선 설정 (이 내부에서 set_approval_line 등이 실행됨)
                 # process_overtime_request가 내부에서 실패하면 이미 status='fail'인 result 반환
                 result = await crawler.process_overtime_request(

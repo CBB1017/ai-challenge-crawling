@@ -8,8 +8,8 @@ import asyncio
 from app.crawler.base import BaseCrawler
 
 class MemberCrawler(BaseCrawler):
-    def __init__(self, login_url: str, username: str, password: str, cookies: list = None):
-        super().__init__(login_url, username, password, cookies)
+    def __init__(self, domain: str, username: str, password: str, cookies: list = None):
+        super().__init__(domain, username, password, cookies)
 
     async def fetch_members(self, groupware_domain: str):
         # 1. 쿠키 확인 및 자동 로그인

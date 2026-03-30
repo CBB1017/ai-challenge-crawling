@@ -1,5 +1,6 @@
 from pydantic import BaseModel, Field, AliasChoices, field_validator
-from typing import List, Optional
+from typing import List, Optional, Literal
+
 
 class ActionEnum(str):
     attendance = "attendance"
@@ -15,47 +16,49 @@ class CrawlRequest(BaseModel):
     slack_channel: Optional[str] = None
 
 class OvertimeRequestModel(BaseModel):
-    # LLM이 'name', 'user' 등으로 불러도 인식
+    # LLM이 시스템 프롬프트에서 읽어서 채워 넣도록 지시
+    target_user_id: str = Field(
+        ...,
+        description="시스템 프롬프트(System Prompt)에 명시된 '현재 로그인한 사용자 ID'를 반드시 그대로 입력하세요."
+    )
+
+    # default를 지우고 ... 을 넣어 필수값으로 만듭니다.
     target_user_name: str = Field(
-        default="",
+        ...,
         validation_alias=AliasChoices('target_user_name', 'user', 'name'),
-        description="OT 대상자 이름 (예: 문병찬). 미입력 시 본인"
+        description="OT 대상자 이름. 대화 컨텍스트에 제공된 '현재 로그인한 사용자 이름'을 입력하세요. 단, 사용자가 다른 사람을 명시적으로 지목한 경우 그 이름을 넣으세요."
     )
 
-    # 'dept', 'department'를 'dept_name'로 매핑
     dept_name: str = Field(
-        default="",
+        ...,
         validation_alias=AliasChoices('dept_name', 'dept', 'department', '부서'),
-        description="부서, 부서명, 소속 (예:DX2팀)"
+        description="대상자의 소속 부서명 (예: DX 2Team). 대화 컨텍스트에 제공된 '현재 로그인한 사용자의 부서'를 입력하세요. 부서 정보가 없으면 임의로 지어내지 말고 사용자에게 물어보세요."
     )
 
-    # 'work_date', 'date'를 'ot_date'로 매핑
     ot_date: str = Field(
-        default="",
+        ...,
         validation_alias=AliasChoices('ot_date', 'work_date', 'date'),
-        description="초과근무 일자 (YYYY-MM-DD)"
+        description="초과근무 일자 (반드시 YYYY-MM-DD 형식). '오늘'인 경우 시스템의 현재 날짜를 계산해서 입력하세요."
     )
 
-    # 'reason'을 'memo'로 매핑
+    # Literal을 사용하여 T와 F 외의 이상한 문자열 생성을 원천 차단
+    action_type: Literal["T", "F"] = Field(
+        default="T",
+        validation_alias=AliasChoices('action_type', 'is_임시_저장', 'save_mode'),
+        description="처리 방식. '상신해줘', '올려줘', '결재해줘' 등의 요청이면 'F'(결재상신), 그 외 '저장' 또는 별도 명시가 없으면 'T'(임시저장)를 입력하세요."
+    )
+
     memo: str = Field(
         default=".",
         validation_alias=AliasChoices('memo', 'reason', 'contents'),
-        description="연장근로 사유"
+        description="연장근로 사유. 사용자가 명시하지 않으면 기본값 '.' 을 사용하세요."
     )
 
-    # 'is_임시_저장' 불리언 값을 'T' 또는 'F'로 변환
-    action_type: str = Field(
-        default="T",
-        validation_alias=AliasChoices('action_type', 'is_임시_저장', 'save_mode'),
-        description="처리 방식. 'T'는 임시저장, 'F'는 결재상신"
-    )
+    # LLM이 자꾸 넣으려고 하는 시간 필드 방어용
+    start_time: Optional[str] = Field(default=None, description="OT 시작 시간 (내부적으로 자동 계산되므로 무시됨)")
+    end_time: Optional[str] = Field(default=None, description="OT 종료 시간 (내부적으로 자동 계산되므로 무시됨)")
 
-    # LLM이 자꾸 넣으려고 하는 시간 필드들을 에러 없이 받아내기 위해 추가 (내부 로직에서 참조 가능)
-    start_time: Optional[str] = Field(default=None, description="OT 시작 시간 (HH:mm)")
-    end_time: Optional[str] = Field(default=None, description="OT 종료 시간 (HH:mm)")
-
-    doc_type: str = Field(default="OT", description="결재 양식 종류")
-    cookies: List[dict] = Field(default_factory=list, exclude=True)
+    doc_type: Literal["OT", "특근"] = Field(default="OT", description="결재 양식 종류. 평일은 'OT', 주말/휴일은 '특근'")
 
     @field_validator('action_type', mode='before')
     @classmethod

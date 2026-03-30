@@ -1,4 +1,5 @@
 import asyncio
+import json
 from datetime import date
 from typing import Any
 
@@ -6,7 +7,9 @@ from bs4 import BeautifulSoup
 import re
 from loguru import logger
 
+from app.core.config import LOGIN_INFO
 from app.crawler.base import BaseCrawler
+from app.session.session_manager import get_session
 
 # 부서명과 별칭들을 하나의 튜플로 묶어서 관리합니다.
 DEPT_MAP_CONFIG = [
@@ -50,10 +53,17 @@ def find_dept_code(user_input: str) -> None | str | tuple[str, str, str] | Any:
 
     return None
 class AttendanceCrawler(BaseCrawler):
-    def __init__(self, login_url: str, username: str, password: str, cookies: list = None):
-        super().__init__(login_url, username, password, cookies)
+    def __init__(self, cookies: list = None):
+        super().__init__(cookies)
 
-    async def fetch_attendance(self, groupware_domain: str, ot_date: str = None, dept_name: str = None):
+    async def fetch_attendance(self, ot_date: str = None, dept_name: str = None):
+        """0. 페이지 진입 전, 근태 데이터 사전 검증 (Fail-Fast)"""
+        if not self.cookies:
+            # 쿠키가 없으면 무조건 에러를 뱉고 뻗습니다.
+            # 프론트엔드는 이 에러를 받아 사용자를 로그인 창으로 튕겨냅니다.
+            logger.warning("유효한 세션(쿠키)이 없습니다. 프론트엔드 리다이렉트 필요.")
+            return {"status": "fail", "message": "세션이 만료되었습니다. 다시 로그인해주세요.", "code": "SESSION_EXPIRED"}
+
         # 1. 필수 파라미터 체크
         if not dept_name:
             raise ValueError("부서명(dept_name)은 필수 입력 항목입니다.")
@@ -71,13 +81,7 @@ class AttendanceCrawler(BaseCrawler):
 
         logger.info(f"조회 시작: 부서={dept_name}(코드:{org_code}), 날짜={target_date}")
 
-        # 4. 로그인 및 페이지 이동
-        if not self.cookies:
-            success, new_cookies = await self.login()
-            if not success: return {"status": "fail", "message": "로그인 실패", "data": None}
-            self.cookies = new_cookies
-
-        soup = await self.get_attendance_table_html(groupware_domain, target_date, org_code)
+        soup = await self.get_attendance_table_html(target_date, org_code)
 
         if not soup:
             return {"status": "fail", "message": f"{target_date} / {dept_name} 데이터 없음", "data": None}
@@ -95,21 +99,23 @@ class AttendanceCrawler(BaseCrawler):
         }
 
 
-    async def get_attendance_table_html(self, groupware_domain: str, target_date: str = None, org_code: str = None):
+    async def get_attendance_table_html(self, target_date: str = None, org_code: str = None):
         """
         target_date: '2026-03-23' 형식 (None이면 오늘)
         org_code: '9' (DX사업부), '17' (DX 1Team) 등 (None이면 기본값)
         """
         try:
-            attendance_url = f"{groupware_domain}/AttendR2/AttendRegist"
+            attendance_url = f"{LOGIN_INFO["domain"]}/AttendR2/AttendRegist"
             await self.page.goto(attendance_url)
 
-            # 1. 세션 체크 및 재로그인
-            if "login" in self.page.url.lower():
-                logger.warning("세션 만료. 재로그인 시도...")
-                success, _ = await self.login()
-                if not success: return None
-                await self.page.goto(attendance_url)
+            # 1. 세션 체크
+            cached_cookies = get_session(username)
+            if not cached_cookies:
+                return json.dumps({
+                    "status": "error",
+                    "code": "SESSION_EXPIRED",
+                    "message": "세션이 만료되었습니다. 다시 로그인해주세요."
+                }, ensure_ascii=False)
             # 2. 부서(조직) 선택 (org_code가 있을 경우)
             if org_code:
                 logger.info(f"부서 변경 시도: {org_code}")

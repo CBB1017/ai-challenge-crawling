@@ -1,50 +1,79 @@
 import asyncio
 import os
+from typing import Optional
 
 from loguru import logger
 from playwright.async_api import async_playwright
 
+from app.core.config import LOGIN_INFO
+
+# ---------------------------------------------------------
+# 1. 전역(Global) CDP 커넥션 관리자
+# ---------------------------------------------------------
+_global_playwright = None
+_global_browser = None
+_cdp_lock = asyncio.Lock()
+
+
+async def get_shared_cdp_browser():
+    """서버 기동 시 (또는 최초 호출 시) 단 한 번만 CDP 웹소켓을 연결합니다."""
+    global _global_playwright, _global_browser
+
+    async with _cdp_lock:
+        # 브라우저 커넥션이 없거나 끊어졌다면 재연결
+        if _global_browser is None or not _global_browser.is_connected():
+            logger.info("🚀 원격 CDP 브라우저에 연결을 시도합니다...")
+
+            if _global_playwright is None:
+                _global_playwright = await async_playwright().start()
+
+            cdp_endpoint = os.environ.get("CDP_ENDPOINT", f"ws://localhost:3001?token={os.environ.get('TOKEN', '')}")
+
+            for attempt in range(3):
+                try:
+                    _global_browser = await _global_playwright.chromium.connect_over_cdp(cdp_endpoint, timeout=10000)
+                    logger.info("✅ CDP 웹소켓 연결 성공!")
+                    break
+                except Exception as e:
+                    if attempt == 2:
+                        logger.error(f"CDP 연결 최종 실패: {e}")
+                        raise
+                    await asyncio.sleep(1)
+
+    return _global_browser
 
 class BaseCrawler:
-    def __init__(self, login_url: str, username: str, password: str, cookies: list = None):
-        self.login_url = login_url
+    def __init__(self,
+                 cookies: list = None,
+                 username: Optional[str] = None,
+                 password: Optional[str] = None):
         self.username = username
         self.password = password
         self.cookies = cookies or []  # 외부에서 전달받은 세션 쿠키
 
-        self.playwright = None
         self.browser = None
         self.context = None
         self.page = None
 
     async def __aenter__(self):
-        self.playwright = await async_playwright().start()
-        cdp_endpoint = os.environ.get("CDP_ENDPOINT", f"ws://localhost:3001?token={os.environ.get('TOKEN', '')}")
+        # self.playwright = await async_playwright().start()
+        # 1. 매번 connect_over_cdp를 하지 않고, 살아있는 글로벌 커넥션을 가져옵니다.
+        self.browser = await get_shared_cdp_browser()
 
-        # for attempt in range(3):
-        #     try:
-        #         self.browser = await self.playwright.chromium.connect_over_cdp(cdp_endpoint, timeout=10000)
-        #         break
-        #     except Exception as e:
-        #         if attempt == 2:
-        #             logger.error(f"CDP 연결 최종 실패: {e}")
-        #             await self.__aexit__(None, None, None)
-        #             raise
-        #         await asyncio.sleep(1)
-        # self.context = await self.browser.new_context(service_workers='block')
+        # 2. 이 요청만을 위한 시크릿 창(컨텍스트) 생성
+        self.context = await self.browser.new_context(service_workers='block')
         #1. 원격 CDP가 아닌 로컬 브라우저를 강제로 띄웁니다.
-        self.browser = await self.playwright.chromium.launch(
-            headless=False,  # 브라우저 숨김 해제
-            slow_mo=1000,  # 마우스/키보드 동작마다 1초씩 대기 (엄청 천천히 움직임)
-            channel="chrome",  # PC에 설치된 실제 크롬 브라우저 사용 (호환성 좋음)
-            args=["--start-maximized"]  # 창을 최대화해서 띄움
-        )
+        # self.browser = await self.playwright.chromium.launch(
+        #     headless=False,  # 브라우저 숨김 해제
+        #     slow_mo=1000,  # 마우스/키보드 동작마다 1초씩 대기 (엄청 천천히 움직임)
+        #     channel="chrome",  # PC에 설치된 실제 크롬 브라우저 사용 (호환성 좋음)
+        #     args=["--start-maximized"]  # 창을 최대화해서 띄움
+        # )
+        #
+        # # 2. 창 최대화 유지를 위해 no_viewport 적용
+        # self.context = await self.browser.new_context(no_viewport=True)
 
-        # 2. 창 최대화 유지를 위해 no_viewport 적용
-        self.context = await self.browser.new_context(no_viewport=True)
-
-
-        # 💡 핵심: 전달받은 쿠키가 있다면 컨텍스트에 주입 (로그인 상태 복원)
+        # 전달받은 쿠키가 있다면 컨텍스트에 주입 (로그인 상태 복원)
         if self.cookies:
             await self.context.add_cookies(self.cookies)
             logger.info("기존 세션 쿠키를 주입했습니다.")
@@ -58,12 +87,12 @@ class BaseCrawler:
             if self.page: await self.page.close()
             if self.context: await self.context.close()
             # if self.browser: await self.browser.close()
-            if self.playwright: await self.playwright.stop()
+            # if self.playwright: await self.playwright.stop()
 
         try:
             await asyncio.wait_for(_cleanup(), timeout=5.0)
         except asyncio.TimeoutError:
-            logger.warning("[WARNING] 브라우저 자원 정리 타임아웃")
+            logger.warning("[WARNING] 컨텍스트 자원 정리 타임아웃")
 
     async def wait_for_frame(self, name, timeout=10):
         interval = 0.2
@@ -74,31 +103,54 @@ class BaseCrawler:
         return None
 
     async def login(self, frame_name="mainFrame"):
+        """최초 로그인 전용 메서드 (프론트엔드에서 로그인 API 호출 시에만 사용)"""
+        if not self.username or not self.password:
+            logger.error("[ERROR] 로그인 정보가 제공되지 않았습니다.")
+            return False, [], {}  # 리턴 형식 맞춤
+
         try:
-            await self.page.goto(self.login_url)
+            await self.page.goto(LOGIN_INFO["domain"])
             frame = await self.wait_for_frame(frame_name)
             if not frame:
                 logger.error("[ERROR] 프레임을 찾을 수 없습니다.")
-                return False, []
+                return False, [], {}
 
             await frame.fill('input[name="UserID"]', self.username)
             await frame.fill('input[name="UserPass"]', self.password)
             await frame.click('button[type="button"].ibtn')
 
             try:
+                # 1. 로그인 성공 여부 확인
                 await frame.wait_for_selector('img[src*="btn_logout.gif"]', timeout=5000)
-                logger.info("[INFO] 로그인 되어있음")
+                logger.info("[INFO] 로그인 성공 및 세션 발급 완료")
 
-                # 로그인 성공 후 세션 쿠키 추출
+                # 2. 이름 및 부서 정보 추출 (HTML 구조 기반)
+                user_info = {"username": "", "dept": ""}
+                try:
+                    # h6 태그의 data-unm 속성에서 정확한 이름 추출 (예: "문병찬")
+                    name_locator = frame.locator("h6#loginUserName")
+                    user_info["username"] = (await name_locator.text_content()).strip()
+
+                    # h6 바로 다음에 오는 p 태그에서 부서명 추출 (예: "DX 2Team")
+                    dept_locator = frame.locator("h6#loginUserName + p")
+                    user_info["dept"] = (await dept_locator.text_content()).strip()
+
+                    logger.info(f"[INFO] 사용자 정보 추출 성공: {user_info['username']} / {user_info['dept']}")
+                except Exception as e:
+                    logger.warning(f"[WARNING] 사용자 정보 추출 실패 (진행은 계속함): {e}")
+
+                # 3. 로그인 성공 후 세션 쿠키 추출
                 cookies = await self.context.cookies()
-                return True, cookies
+
+                # 성공, 쿠키리스트, 유저정보(dict) 반환
+                return True, cookies, user_info
 
             except Exception:
                 logger.error("[ERROR] 로그인 실패 (로그아웃 버튼 없음)")
-                return False, []
+                return False, [], {}
         except Exception as e:
-            logger.error(f"[ERROR] 로그인 실패: {e}")
-            return False, []
+            logger.error(f"[ERROR] 로그인 페이지 접근 실패: {e}")
+            return False, [], {}
 
     async def recover_doc_write_page(self, keyword: str = "Doc_Write", timeout: float = 5.0):
         import time

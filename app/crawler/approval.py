@@ -23,8 +23,8 @@ def normalize_ot_minute(minute_str: str) -> str:
 
 
 class ApprovalCrawler(BaseCrawler):
-    def __init__(self, login_url: str, username: str, password: str, cookies: list = None):
-        super().__init__(login_url, username, password, cookies)
+    def __init__(self, cookies: list = None):
+        super().__init__(cookies)
 
     async def process_overtime_request(
             self,
@@ -37,17 +37,14 @@ class ApprovalCrawler(BaseCrawler):
         groupware_domain = os.environ["GROUPWARE_DOMAIN"]
         """1. 페이지 진입 전, 근태 데이터 사전 검증 (Fail-Fast)"""
         if not self.cookies:
-            success, new_cookies = await self.login()
-            if not success: return {"status": "fail", "message": "로그인 실패"}
-            self.cookies = new_cookies
+            # 쿠키가 없으면 무조건 에러를 뱉고 뻗습니다.
+            # 프론트엔드는 이 에러를 받아 사용자를 로그인 창으로 튕겨냅니다.
+            logger.warning("유효한 세션(쿠키)이 없습니다. 프론트엔드 리다이렉트 필요.")
+            return {"status": "fail", "message": "세션이 만료되었습니다. 다시 로그인해주세요.", "code": "SESSION_EXPIRED"}
 
         # 근태 크롤러로 해당 유저 데이터 조회
-        async with AttendanceCrawler(self.login_url, self.username, self.password, self.cookies) as att_crawler:
-            att_result = await att_crawler.fetch_attendance(
-                groupware_domain,
-                ot_date=ot_date,
-                dept_name=dept_name
-            )
+        async with AttendanceCrawler(self.cookies) as att_crawler:
+            att_result = await att_crawler.fetch_attendance(ot_date,dept_name)
 
         if att_result.get("status") != "success":
             return {"status": "fail", "message": "근태 조회 실패"}

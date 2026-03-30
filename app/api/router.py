@@ -29,7 +29,7 @@ async def crawling_action(
     request_data: Optional[CrawlerRequest] = None # AI가 분석한 세부 파라미터 수신
 ):
     login_info = {
-        "login_url": os.environ["GROUPWARE_DOMAIN"],
+        "domain": os.environ["GROUPWARE_DOMAIN"],
         "username": os.environ["LOGIN_ID"],
         "password": os.environ["LOGIN_PW"],
     }

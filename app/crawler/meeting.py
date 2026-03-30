@@ -1,34 +1,31 @@
+import json
 import re
-import os
 from loguru import logger
 from bs4 import BeautifulSoup
 
+from app.core.config import LOGIN_INFO
 from app.crawler.base import BaseCrawler
+from app.session.session_manager import get_session
+
 
 class MeetingRoomCrawler(BaseCrawler):
-    def __init__(self, login_url: str, username: str, password: str, cookies: list = None):
-        super().__init__(login_url, username, password, cookies)
+    def __init__(self, cookies: list = None):
+        super().__init__(cookies)
 
-    async def fetch_reservations(self, groupware_domain: str, room_name: str = None):
-        # 1. 쿠키(세션) 확인 및 자동 로그인
-        if not self.cookies:
-            success, new_cookies = await self.login()
-            if not success:
-                return {"status": "fail", "message": "로그인 실패", "data": None}
-            self.cookies = new_cookies
+    async def fetch_reservations(self, room_name: str = None):
+        # 1. 세션 체크
+        cached_cookies = get_session(username)
+        if not cached_cookies:
+            return json.dumps({
+                "status": "error",
+                "code": "SESSION_EXPIRED",
+                "message": "세션이 만료되었습니다. 다시 로그인해주세요."
+            }, ensure_ascii=False)
 
         try:
             # 2. 회의실 예약 페이지 이동
-            url = f"{groupware_domain}/RsvObjMgr/RsvObj_List?cmbCateNo=1#RsvObjMgrLeftBoxShare0"
+            url = f"{LOGIN_INFO["domain"]}/RsvObjMgr/RsvObj_List?cmbCateNo=1#RsvObjMgrLeftBoxShare0"
             await self.page.goto(url)
-
-            # 세션 만료 시 재로그인 처리
-            if "login" in self.page.url.lower():
-                logger.warning("세션 만료. 재로그인 시도...")
-                success, self.cookies = await self.login()
-                if not success:
-                    return {"status": "fail", "message": "재로그인 실패", "data": None}
-                await self.page.goto(url)
 
             # 무조건 대기하기보다 테이블이 렌더링될 때까지 대기
             try:
