@@ -164,6 +164,8 @@ async def request_overtime_approval(
     # 2. 세션 검증 (데코레이터가 하던 역할)
     # ---------------------------------------------------------
     cached_cookies = get_session(data.target_user_id)
+    logger.info(f"cached cookies exist")
+
     if not cached_cookies:
         return json.dumps({
             "status": "error",

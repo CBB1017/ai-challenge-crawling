@@ -1,18 +1,14 @@
-# server.py 수정
-from functools import partial
 from threading import Thread
 
-import anyio
 import uvicorn
 from loguru import logger
 from fastapi import FastAPI, HTTPException
-from mcp.server import FastMCP
 from pydantic import BaseModel
 
+from app.core.config import LoggingMiddleware
 from app.core.server import semaphore, mcp
-from app.core.utils import get_email_from_jwt
 from app.crawler.base import BaseCrawler
-from app.session.session_manager import save_session
+from app.session.session_manager import save_session, get_session
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
@@ -22,10 +18,12 @@ app = FastAPI(title="Groupware Auth Proxy")
 # FastAPI 서버 설정
 config = uvicorn.Config(app, host="0.0.0.0", port=8000, log_level="info")
 server = uvicorn.Server(config)
+# 미들웨어 추가
+app.add_middleware(LoggingMiddleware)
 
 # 요청/응답 모델 정의
 class LoginRequest(BaseModel):
-    username: str
+    userId: str
     password: str
 
 @app.exception_handler(RequestValidationError)
@@ -39,37 +37,37 @@ async def validation_exception_handler(request, exc):
 @app.post("/api/login")
 async def login_endpoint(request: LoginRequest):
     """그룹웨어 로그인을 수행하고 유저 정보와 쿠키를 반환합니다."""
-    logger.info(f"정적 로그인 시도 중... User: {request.username} password: {request.password}")
+    logger.info(f"정적 로그인 시도 중...")
     async with semaphore:
         try:
-            async with BaseCrawler(username=request.username, password=request.password) as crawler:
-                success, cookies, access_token, user_info = await crawler.login()
+            async with BaseCrawler(username=request.userId, password=request.password) as crawler:
+                success, cookies, data = await crawler.login()
 
                 if not success:
+                    error_message = (data or {}).get("error") or "로그인 시 오류가 발생했습니다."
                     return {
                         "status": "fail",
-                        "message": "Login failed",
+                        "message": error_message,
                         "user": None
                     }
 
-                email = await get_email_from_jwt(access_token)
-                save_session(email, cookies)
+                save_session(data.get("userId"), cookies)
+
                 # 성공 시 데이터 구조화
                 return {
                     "status": "success",
-                    "token": access_token,
                     "message": "Login successful",
                     "cookies": cookies,  # 리스트 형태의 쿠키
                     "user": {
-                        "nameAndPosition": user_info.get("username"), # "문병찬 대리"
-                        "dept": user_info.get("dept")          # "DX 2Team"
+                        "nameAndPosition": data.get("username"), # "문병찬 대리"
+                        "dept": data.get("dept"),          # "DX 2Team"
+                        "userId": data.get("userId")         # "bc.mun"
                     }
                 }
 
         except Exception as e:
             logger.exception(f"로그인 도중 예외 발생: {e}")
             raise HTTPException(status_code=500, detail=str(e))
-
 
 @app.get("/status")
 async def status():

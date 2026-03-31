@@ -61,7 +61,7 @@ class BaseCrawler:
         self.browser = await get_shared_cdp_browser()
 
         # 2. 이 요청만을 위한 시크릿 창(컨텍스트) 생성
-        self.context = await self.browser.new_context(service_workers='allow')
+        self.context = await self.browser.new_context(service_workers='block')
         #1. 원격 CDP가 아닌 로컬 브라우저를 강제로 띄웁니다.
         # self.browser = await self.playwright.chromium.launch(
         #     headless=False,  # 브라우저 숨김 해제
@@ -106,26 +106,60 @@ class BaseCrawler:
         """최초 로그인 전용 메서드 (프론트엔드에서 로그인 API 호출 시에만 사용)"""
         if not self.username or not self.password:
             logger.error("[ERROR] 로그인 정보가 제공되지 않았습니다.")
-            return False, [], "", {}
+            return False, [], {}
 
         try:
             await self.page.goto(LOGIN_INFO["domain"])
             frame = await self.wait_for_frame(frame_name)
             if not frame:
                 logger.error("[ERROR] 프레임을 찾을 수 없습니다.")
-                return False, [], "", {}
+                return False, [], {}
 
+            # 1. Alert 메시지를 담을 Future 객체 생성
+            alert_future = asyncio.get_event_loop().create_future()
+
+            async def handle_dialog(dialog):
+                # 어떤 Alert이든 메시지를 Future에 기록하고 닫음
+                if not alert_future.done():
+                    alert_future.set_result(dialog.message)
+                await dialog.dismiss()
+
+            # 2. 리스너 등록
+            self.page.on("dialog", handle_dialog)
+
+            # 3. 로그인 시도
             await frame.fill('input[name="UserID"]', self.username)
             await frame.fill('input[name="UserPass"]', self.password)
             await frame.click('button[type="button"].ibtn')
 
+            # 코루틴을 Task로 변환하여 등록
+            # wait_for를 호출한 상태의 코루틴을 Task로 감싸야 합니다.
+            success_task = asyncio.create_task(
+                frame.locator('img[src*="btn_logout"]').wait_for(state="visible", timeout=5000)
+            )
+
             try:
-                # 1. 로그인 성공 여부 확인
-                await frame.wait_for_selector('img[src*="btn_logout.gif"]', timeout=5000)
-                logger.info("[INFO] 로그인 성공 및 세션 발급 완료")
+                # 4. Alert 발생 또는 로그인 성공(로그아웃 버튼 출현) 중 먼저 일어나는 것을 대기
+                # 2초 동안 Alert이 뜨는지 감시 (보통 클릭 직후 바로 뜸)
+                done, pending = await asyncio.wait(
+                    [alert_future, success_task],
+                    return_when=asyncio.FIRST_COMPLETED
+                )
+
+                # 만약 Alert이 먼저 발생했다면
+                if alert_future.done():
+                    # Alert이 먼저 뜬 경우: 성공 Task는 취소하고 메시지 반환
+                    success_task.cancel()
+                    error_msg = alert_future.result()
+                    logger.error(f"[로그인 실패 - Alert 발생] {error_msg}")
+                    return False, [], {"error": error_msg}
+
+                if success_task.done():
+                    # 로그인이 성공한 경우
+                    logger.info("[INFO] 로그인 성공 및 세션 발급 완료")
 
                 # 2. 이름 및 부서 정보 추출 (HTML 구조 기반)
-                user_info = {"username": "", "dept": ""}
+                user_info = {"username": "", "dept": "", "userId": self.username}
                 try:
                     # h6 컨텐트 정확한 이름+직급 추출 (예: "문병찬 대리")
                     name_locator = frame.locator("h6#loginUserName")
@@ -137,43 +171,30 @@ class BaseCrawler:
 
                     logger.info(f"[INFO] 사용자 정보 추출 성공: {user_info['username']} / {user_info['dept']}")
 
-                    access_token = await frame.evaluate("""() => {
-                        return new Promise((resolve) => {
-                            const token = localStorage.getItem('accessToken');
-                            if (token) return resolve(token);
-
-                            // 0.5초마다 확인하는 인터벌
-                            const interval = setInterval(() => {
-                                const t = localStorage.getItem('accessToken');
-                                if (t) {
-                                    clearInterval(interval);
-                                    resolve(t);
-                                }
-                            }, 500);
-                            setTimeout(() => { clearInterval(interval); resolve(null); }, 5000);
-                        });
-                    }""")
-
-                    # 3. 만약 'accessToken'이라는 키가 아니라 다른 키라면 확인 필요
-                    if not access_token:
-                        logger.error("localStorage에서 accessToken을 찾을 수 없습니다.")
-                        return False, [], "", {}
-
                     # 4. 세션 쿠키 추출
                     cookies = await self.context.cookies()
                 except Exception as e:
                     logger.error(f"데이터 추출 중 에러 발생: {e}")
-                    return False, [], "", {}
+                    return False, [], {}
 
                 # 성공, 쿠키리스트, 토큰, 유저정보(dict) 반환
-                return True, cookies, access_token, user_info
+                return True, cookies, user_info
 
-            except Exception:
-                logger.error("[ERROR] 로그인 실패 (로그아웃 버튼 없음)")
-                return False, [], "", {}
+            except Exception as e:
+                # 5. Alert도 없고 버튼도 안 나온 경우 (타임아웃 등)
+                if alert_future.done():
+                    return False, [], {"error": alert_future.result()}
+                logger.error(f"[ERROR] 로그인 프로세스 중 에러: {e}")
+                return False, [], {}
+
+            finally:
+                # 대기 중인 다른 작업들 정리 (메모리 누수 방지)
+                if not success_task.done():
+                    success_task.cancel()
+                self.page.remove_listener("dialog", handle_dialog)
         except Exception as e:
             logger.error(f"[ERROR] 로그인 페이지 접근 실패: {e}")
-            return False, [], "", {}
+            return False, [], {}
 
     async def recover_doc_write_page(self, keyword: str = "Doc_Write", timeout: float = 5.0):
         import time
