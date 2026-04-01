@@ -1,5 +1,6 @@
 import asyncio
 import os
+import time
 from typing import Optional
 
 from loguru import logger
@@ -7,40 +8,123 @@ from playwright.async_api import async_playwright
 
 from app.core.config import LOGIN_INFO
 
-# ---------------------------------------------------------
-# 1. 전역(Global) CDP 커넥션 관리자
-# ---------------------------------------------------------
-_global_playwright = None
-_global_browser = None
-_cdp_lock = asyncio.Lock()
+class ContextPool:
+    _pool = {}
+    _lock = asyncio.Lock()
+    TTL_SECONDS = 600  # 10분
+    MAX_POOL = 50
 
+    @classmethod
+    async def get_or_create(cls, user_key, browser, cookies=None):
+        async with cls._lock:
+            session = cls._pool.get(user_key)
 
-async def get_shared_cdp_browser():
-    """서버 기동 시 (또는 최초 호출 시) 단 한 번만 CDP 웹소켓을 연결합니다."""
-    global _global_playwright, _global_browser
-
-    async with _cdp_lock:
-        # 브라우저 커넥션이 없거나 끊어졌다면 재연결
-        if _global_browser is None or not _global_browser.is_connected():
-            logger.info("🚀 원격 CDP 브라우저에 연결을 시도합니다...")
-
-            if _global_playwright is None:
-                _global_playwright = await async_playwright().start()
-
-            cdp_endpoint = os.environ.get("CDP_ENDPOINT", f"ws://localhost:3001?token={os.environ.get('TOKEN', '')}")
-
-            for attempt in range(3):
+            if session:
                 try:
-                    _global_browser = await _global_playwright.chromium.connect_over_cdp(cdp_endpoint, timeout=10000)
-                    logger.info("✅ CDP 웹소켓 연결 성공!")
-                    break
-                except Exception as e:
-                    if attempt == 2:
-                        logger.error(f"CDP 연결 최종 실패: {e}")
-                        raise
-                    await asyncio.sleep(1)
+                    session["last_used"] = time.time()
+                    return session["context"]
+                except:
+                    logger.warning(f"⚠️ stale context 제거: {user_key}")
+                    await cls.remove(user_key)
 
-    return _global_browser
+            if len(cls._pool) >= cls.MAX_POOL:
+                oldest_key = min(
+                    cls._pool.keys(),
+                    key=lambda k: cls._pool[k]["last_used"]
+                )
+
+                logger.info(f"♻️ oldest context 제거: {oldest_key}")
+                await cls.remove(oldest_key)
+
+            context = await browser.new_context(service_workers="block")
+
+            if cookies:
+                await context.add_cookies(cookies)
+
+            cls._pool[user_key] = {
+                "context": context,
+                "last_used": time.time()
+            }
+
+            return context
+
+    @classmethod
+    async def remove(cls, user_key):
+        session = cls._pool.pop(user_key, None)
+        if session:
+            try:
+                await session["context"].close()
+            except:
+                pass
+
+    @classmethod
+    async def cleanup(cls):
+        async with cls._lock:
+            now = time.time()
+            expired = []
+
+            for key, session in cls._pool.items():
+                if now - session["last_used"] > cls.TTL_SECONDS:
+                    expired.append(key)
+
+            for key in expired:
+                logger.info(f"🧹 expired context 제거: {key}")
+                await cls.remove(key)
+
+class _CDPConnectionManager:
+    def __init__(self):
+        self._lock = asyncio.Lock()
+        self.playwright = None
+        self.browser = None
+
+    async def _handle_disconnect(self):
+        logger.warning("⚠️ CDP disconnected")
+        self.browser = None
+
+    async def get_browser(self):
+        async with self._lock:
+            if self.browser is None or not self.browser.is_connected():
+                logger.info("🚀 CDP reconnect")
+
+                if self.playwright is None:
+                    self.playwright = await async_playwright().start()
+
+                cdp_endpoint = os.environ.get("CDP_ENDPOINT", "ws://localhost:3001")
+                token = os.environ.get("TOKEN", "")
+
+                if token:
+                    cdp_endpoint = f"{cdp_endpoint}?token={token}"
+
+                for attempt in range(3):
+                    try:
+                        self.browser = await self.playwright.chromium.connect_over_cdp(
+                            cdp_endpoint,
+                            timeout=10000
+                        )
+
+                        self.browser.on(
+                            "disconnected",
+                            lambda _: asyncio.create_task(self._handle_disconnect())
+                        )
+
+                        logger.info("✅ CDP connected")
+                        break
+
+                    except Exception as e:
+                        if attempt == 2:
+                            logger.error(f"❌ CDP 연결 실패: {e}")
+                            raise
+
+                        await asyncio.sleep(1)
+
+        return self.browser
+
+# 전역 싱글톤 인스턴스 생성
+cdp_manager = _CDPConnectionManager()
+
+# 동시에 실행될 수 있는 최대 크롤러 수를 10개로 제한
+MAX_CONCURRENT_CRAWLERS = 10
+crawler_semaphore = asyncio.Semaphore(MAX_CONCURRENT_CRAWLERS)
 
 class BaseCrawler:
     def __init__(self,
@@ -55,13 +139,33 @@ class BaseCrawler:
         self.context = None
         self.page = None
 
+        self.user_key = username or "anonymous"
     async def __aenter__(self):
+        # 1. 10개가 꽉 차면 11번째 요청은 여기서 대기(Blocking)합니다.
+        # 앞선 작업이 끝나서 자리가 나면 자동으로 실행을 이어갑니다.
+        await crawler_semaphore.acquire()
+        logger.debug(f"🚦 세마포어 획득")
+        await ContextPool.cleanup()
         # self.playwright = await async_playwright().start()
+        self.browser = await cdp_manager.get_browser()
         # 1. 매번 connect_over_cdp를 하지 않고, 살아있는 글로벌 커넥션을 가져옵니다.
-        self.browser = await get_shared_cdp_browser()
+        try:
+            self.context = await ContextPool.get_or_create(
+                self.user_key,
+                self.browser,
+                self.cookies
+            )
+        except Exception as e:
+            logger.warning(f"⚠️ 컨텍스트 생성 실패, 브라우저 재연결 시도: {e}")
+            cdp_manager.browser = None
 
-        # 2. 이 요청만을 위한 시크릿 창(컨텍스트) 생성
-        self.context = await self.browser.new_context(service_workers='block')
+            self.browser = await cdp_manager.get_browser()
+
+            self.context = await ContextPool.get_or_create(
+                self.user_key,
+                self.browser,
+                self.cookies
+            )
         #1. 원격 CDP가 아닌 로컬 브라우저를 강제로 띄웁니다.
         # self.browser = await self.playwright.chromium.launch(
         #     headless=False,  # 브라우저 숨김 해제
@@ -72,11 +176,11 @@ class BaseCrawler:
         #
         # # 2. 창 최대화 유지를 위해 no_viewport 적용
         # self.context = await self.browser.new_context(no_viewport=True)
-
+        self.page = await self.context.new_page()
         # 전달받은 쿠키가 있다면 컨텍스트에 주입 (로그인 상태 복원)
-        if self.cookies:
-            await self.context.add_cookies(self.cookies)
-            logger.info("기존 세션 쿠키를 주입했습니다.")
+        # if self.cookies:
+        #     await self.context.add_cookies(self.cookies)
+        #     logger.info("기존 세션 쿠키를 주입했습니다.")
 
         self.page = await self.context.new_page()
         return self
@@ -85,7 +189,7 @@ class BaseCrawler:
         # 자원 해제 타임아웃 적용
         async def _cleanup():
             if self.page: await self.page.close()
-            if self.context: await self.context.close()
+            # if self.context: await self.context.close()
             # if self.browser: await self.browser.close()
             # if self.playwright: await self.playwright.stop()
 
@@ -93,6 +197,10 @@ class BaseCrawler:
             await asyncio.wait_for(_cleanup(), timeout=5.0)
         except asyncio.TimeoutError:
             logger.warning("[WARNING] 컨텍스트 자원 정리 타임아웃")
+        finally:
+            # 2. 작업이 끝났든, 에러가 났든 무조건 세마포어를 반납하여 다음 요청이 실행되도록 함
+            crawler_semaphore.release()
+            logger.debug("🚦 세마포어 반납 완료")
 
     async def wait_for_frame(self, name, timeout=10):
         interval = 0.2
@@ -197,13 +305,9 @@ class BaseCrawler:
             return False, [], {}
 
     async def recover_doc_write_page(self, keyword: str = "Doc_Write", timeout: float = 5.0):
-        import time
-
         start_time = time.time()
         while time.time() - start_time < timeout:
-            # context 내의 모든 페이지를 역순으로 검사 (보통 최신 페이지가 뒤에 있음)
-            pages = self.context.pages
-            for p in reversed(pages):
+            for p in reversed(self.context.pages):
                 logger.info(f"Page : {p}")
 
                 try:
