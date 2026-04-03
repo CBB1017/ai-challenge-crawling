@@ -5,6 +5,7 @@ import json
 from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 from loguru import logger
+from starlette.responses import JSONResponse
 
 load_dotenv()
 
@@ -13,7 +14,6 @@ LOGIN_INFO = {
     "username": os.environ.get("LOGIN_ID"),
     "password": os.environ.get("LOGIN_PW"),
 }
-
 
 
 class LoggingMiddleware(BaseHTTPMiddleware):
@@ -31,7 +31,23 @@ class LoggingMiddleware(BaseHTTPMiddleware):
         logger.info(f"REQ: {request.method} {request.url.path} | Body: {req_json}")
 
         # 2. 다음 프로세스 진행
-        response = await call_next(request)
+        try:
+            # 2. 다음 프로세스 진행 (여기서 예외가 발생할 수 있음)
+            response = await call_next(request)
+        except Exception as e:
+            # 여기서 예외를 잡지 않으면 "No response returned"가 발생함
+            process_time = (time.time() - start_time) * 1000
+            logger.error(f"❌ [Middleware Error] {str(e)}")
+
+            # 에러 발생 시 즉시 응답 생성하여 반환
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "status": "error",
+                    "message": "서버 내부 오류가 발생했습니다.",
+                    "detail": str(e)
+                }
+            )
 
         # 3. Response Body 추출 (에러 해결 핵심)
         res_body_bytes = b""

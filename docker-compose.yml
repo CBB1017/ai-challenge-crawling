@@ -18,7 +18,7 @@ services:
     container_name: attendance_python
     environment:
       - PYTHONUNBUFFERED=1
-      - CDP_ENDPOINT=ws://browserless:3000?token=01QWI6OUT42U8
+      - CDP_ENDPOINT=ws://browserless:3000
       - PORT=8080
       - LOG_LEVEL=DEBUG
       - GROUPWARE_DOMAIN=https://ekp.brycenkorea.co.kr:1212

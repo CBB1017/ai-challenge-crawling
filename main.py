@@ -6,7 +6,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from app.core.config import LoggingMiddleware
-from app.core.server import semaphore, mcp
+from app.core.server import mcp
 from app.crawler.base import BaseCrawler
 from app.session.session_manager import save_session, get_session
 from fastapi.exceptions import RequestValidationError
@@ -38,36 +38,35 @@ async def validation_exception_handler(request, exc):
 async def login_endpoint(request: LoginRequest):
     """그룹웨어 로그인을 수행하고 유저 정보와 쿠키를 반환합니다."""
     logger.info(f"정적 로그인 시도 중...")
-    async with semaphore:
-        try:
-            async with BaseCrawler(username=request.userId, password=request.password) as crawler:
-                success, cookies, data = await crawler.login()
+    try:
+        async with BaseCrawler(username=request.userId, password=request.password) as crawler:
+            success, cookies, data = await crawler.login()
 
-                if not success:
-                    error_message = (data or {}).get("error") or "로그인 시 오류가 발생했습니다."
-                    return {
-                        "status": "fail",
-                        "message": error_message,
-                        "user": None
-                    }
-
-                save_session(data.get("userId"), cookies)
-
-                # 성공 시 데이터 구조화
+            if not success:
+                error_message = (data or {}).get("error") or "로그인 시 오류가 발생했습니다."
                 return {
-                    "status": "success",
-                    "message": "Login successful",
-                    "cookies": cookies,  # 리스트 형태의 쿠키
-                    "user": {
-                        "nameAndPosition": data.get("username"), # "문병찬 대리"
-                        "dept": data.get("dept"),          # "DX 2Team"
-                        "userId": data.get("userId")         # "bc.mun"
-                    }
+                    "status": "fail",
+                    "message": error_message,
+                    "user": None
                 }
 
-        except Exception as e:
-            logger.exception(f"로그인 도중 예외 발생: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
+            save_session(data.get("userId"), cookies)
+
+            # 성공 시 데이터 구조화
+            return {
+                "status": "success",
+                "message": "Login successful",
+                "cookies": cookies,  # 리스트 형태의 쿠키
+                "user": {
+                    "nameAndPosition": data.get("username"), # "문병찬 대리"
+                    "dept": data.get("dept"),          # "DX 2Team"
+                    "userId": data.get("userId")         # "bc.mun"
+                }
+            }
+
+    except Exception as e:
+        logger.exception(f"로그인 도중 예외 발생: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/status")
 async def status():

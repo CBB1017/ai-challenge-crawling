@@ -8,6 +8,17 @@ from playwright.async_api import async_playwright
 
 from app.core.config import LOGIN_INFO
 
+class UserLockPool:
+    _locks = {}
+    _global_lock = asyncio.Lock()
+
+    @classmethod
+    async def get_lock(cls, user_key):
+        async with cls._global_lock:
+            if user_key not in cls._locks:
+                cls._locks[user_key] = asyncio.Lock()
+            return cls._locks[user_key]
+
 class ContextPool:
     _pool = {}
     _lock = asyncio.Lock()
@@ -140,67 +151,70 @@ class BaseCrawler:
         self.page = None
 
         self.user_key = username or "anonymous"
+        self.user_lock = None
     async def __aenter__(self):
         # 1. 10개가 꽉 차면 11번째 요청은 여기서 대기(Blocking)합니다.
         # 앞선 작업이 끝나서 자리가 나면 자동으로 실행을 이어갑니다.
         await crawler_semaphore.acquire()
-        logger.debug(f"🚦 세마포어 획득")
-        await ContextPool.cleanup()
-        # self.playwright = await async_playwright().start()
-        self.browser = await cdp_manager.get_browser()
-        # 1. 매번 connect_over_cdp를 하지 않고, 살아있는 글로벌 커넥션을 가져옵니다.
         try:
-            self.context = await ContextPool.get_or_create(
-                self.user_key,
-                self.browser,
-                self.cookies
-            )
-        except Exception as e:
-            logger.warning(f"⚠️ 컨텍스트 생성 실패, 브라우저 재연결 시도: {e}")
-            cdp_manager.browser = None
+            logger.debug(f"🚦 세마포어 획득")
+            await ContextPool.cleanup()
 
+            logger.debug("1. 브라우저 연결 시도")
             self.browser = await cdp_manager.get_browser()
 
+            logger.debug(f"2. 유저 락 획득 시도: {self.user_key}")
+            self.user_lock = await UserLockPool.get_lock(self.user_key)
+            await self.user_lock.acquire()
+
+            logger.debug("3. 컨텍스트 생성/조회 시도")
             self.context = await ContextPool.get_or_create(
                 self.user_key,
                 self.browser,
                 self.cookies
             )
-        #1. 원격 CDP가 아닌 로컬 브라우저를 강제로 띄웁니다.
-        # self.browser = await self.playwright.chromium.launch(
-        #     headless=False,  # 브라우저 숨김 해제
-        #     slow_mo=1000,  # 마우스/키보드 동작마다 1초씩 대기 (엄청 천천히 움직임)
-        #     channel="chrome",  # PC에 설치된 실제 크롬 브라우저 사용 (호환성 좋음)
-        #     args=["--start-maximized"]  # 창을 최대화해서 띄움
-        # )
-        #
-        # # 2. 창 최대화 유지를 위해 no_viewport 적용
-        # self.context = await self.browser.new_context(no_viewport=True)
-        self.page = await self.context.new_page()
-        # 전달받은 쿠키가 있다면 컨텍스트에 주입 (로그인 상태 복원)
-        # if self.cookies:
-        #     await self.context.add_cookies(self.cookies)
-        #     logger.info("기존 세션 쿠키를 주입했습니다.")
 
-        self.page = await self.context.new_page()
-        return self
+            logger.debug("4. 새 페이지 생성 시도")
+            self.page = await self.context.new_page()
+
+            logger.debug("5. 모든 준비 완료")
+            return self
+
+        except Exception as e:
+            # 진입 단계에서 실패 시 자원 반납
+            await self.__aexit__(type(e), e, None)
+            raise
+            #1. 원격 CDP가 아닌 로컬 브라우저를 강제로 띄웁니다.
+            # self.browser = await self.playwright.chromium.launch(
+            #     headless=False,  # 브라우저 숨김 해제
+            #     slow_mo=1000,  # 마우스/키보드 동작마다 1초씩 대기 (엄청 천천히 움직임)
+            #     channel="chrome",  # PC에 설치된 실제 크롬 브라우저 사용 (호환성 좋음)
+            #     args=["--start-maximized"]  # 창을 최대화해서 띄움
+            # )
+            #
+            # # 2. 창 최대화 유지를 위해 no_viewport 적용
+            # self.context = await self.browser.new_context(no_viewport=True)
+            # 전달받은 쿠키가 있다면 컨텍스트에 주입 (로그인 상태 복원)
+            # if self.cookies:
+            #     await self.context.add_cookies(self.cookies)
+            #     logger.info("기존 세션 쿠키를 주입했습니다.")
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        # 자원 해제 타임아웃 적용
-        async def _cleanup():
-            if self.page: await self.page.close()
-            # if self.context: await self.context.close()
-            # if self.browser: await self.browser.close()
-            # if self.playwright: await self.playwright.stop()
-
         try:
-            await asyncio.wait_for(_cleanup(), timeout=5.0)
-        except asyncio.TimeoutError:
+            # 페이지 종료 (Context는 Pool이 관리하므로 닫지 않음)
+            if self.page:
+                await asyncio.wait_for(self.page.close(), timeout=2.0)
+        except Exception as e:
             logger.warning("[WARNING] 컨텍스트 자원 정리 타임아웃")
+            logger.debug(f"Page close error: {e}")
+            pass
         finally:
-            # 2. 작업이 끝났든, 에러가 났든 무조건 세마포어를 반납하여 다음 요청이 실행되도록 함
+            # 락 해제 순서: Lock -> Semaphore
+            if self.user_lock and self.user_lock.locked():
+                self.user_lock.release()
+
             crawler_semaphore.release()
-            logger.debug("🚦 세마포어 반납 완료")
+            logger.debug(f"🚦 자원 반납 완료 ({self.user_key})")
 
     async def wait_for_frame(self, name, timeout=10):
         interval = 0.2
@@ -214,14 +228,16 @@ class BaseCrawler:
         """최초 로그인 전용 메서드 (프론트엔드에서 로그인 API 호출 시에만 사용)"""
         if not self.username or not self.password:
             logger.error("[ERROR] 로그인 정보가 제공되지 않았습니다.")
-            return False, [], {}
+            return False, [], {"error": "Credentials missing"}
 
         try:
-            await self.page.goto(LOGIN_INFO["domain"])
-            frame = await self.wait_for_frame(frame_name)
+            logger.debug("페이지 이동 시작")
+            await self.page.goto(LOGIN_INFO["domain"], timeout=10000, wait_until="domcontentloaded")
+            logger.debug(f"프레임 대기: {frame_name}")
+            frame = await self.wait_for_frame(frame_name, timeout=5)
             if not frame:
                 logger.error("[ERROR] 프레임을 찾을 수 없습니다.")
-                return False, [], {}
+                return False, [], {"error": "Frame not found"}
 
             # 1. Alert 메시지를 담을 Future 객체 생성
             alert_future = asyncio.get_event_loop().create_future()
@@ -230,7 +246,7 @@ class BaseCrawler:
                 # 어떤 Alert이든 메시지를 Future에 기록하고 닫음
                 if not alert_future.done():
                     alert_future.set_result(dialog.message)
-                await dialog.dismiss()
+                asyncio.create_task(dialog.dismiss())
 
             # 2. 리스너 등록
             self.page.on("dialog", handle_dialog)
@@ -248,24 +264,31 @@ class BaseCrawler:
 
             try:
                 # 4. Alert 발생 또는 로그인 성공(로그아웃 버튼 출현) 중 먼저 일어나는 것을 대기
-                # 2초 동안 Alert이 뜨는지 감시 (보통 클릭 직후 바로 뜸)
+                # 7초 동안 Alert이 뜨는지 감시 (보통 클릭 직후 바로 뜸)
                 done, pending = await asyncio.wait(
                     [alert_future, success_task],
-                    return_when=asyncio.FIRST_COMPLETED
+                    return_when=asyncio.FIRST_COMPLETED,
+                    timeout=8.0
                 )
 
-                # 만약 Alert이 먼저 발생했다면
-                if alert_future.done():
-                    # Alert이 먼저 뜬 경우: 성공 Task는 취소하고 메시지 반환
-                    success_task.cancel()
-                    error_msg = alert_future.result()
-                    logger.error(f"[로그인 실패 - Alert 발생] {error_msg}")
-                    return False, [], {"error": error_msg}
+                # 1. 미완료된 태스크만 취소
+                for task in pending:
+                    if not task.done():
+                        task.cancel()
 
-                if success_task.done():
+                # 2. Alert 결과 확인 (CancelledError 방지)
+                if alert_future.done() and not alert_future.cancelled():
+                    try:
+                        error_msg = alert_future.result()
+                        logger.error(f"[로그인 실패 - Alert 발생] {error_msg}")
+                        return False, [], {"error": error_msg}
+                    except asyncio.CancelledError:
+                        # 혹시나 그 사이 취소되었다면 무시
+                        pass
+
+                if success_task.done() and not success_task.cancelled():
                     # 로그인이 성공한 경우
                     logger.info("[INFO] 로그인 성공 및 세션 발급 완료")
-
                 # 2. 이름 및 부서 정보 추출 (HTML 구조 기반)
                 user_info = {"username": "", "dept": "", "userId": self.username}
                 try:
