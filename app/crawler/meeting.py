@@ -1,11 +1,9 @@
-import json
 import re
 from loguru import logger
 from bs4 import BeautifulSoup
 
 from app.core.config import LOGIN_INFO
 from app.crawler.base import BaseCrawler
-from app.session.session_manager import get_session
 
 
 class MeetingRoomCrawler(BaseCrawler):
@@ -13,14 +11,6 @@ class MeetingRoomCrawler(BaseCrawler):
         super().__init__(cookies)
 
     async def fetch_reservations(self, room_name: str = None):
-        # 1. 세션 체크
-        cached_cookies = get_session(username)
-        if not cached_cookies:
-            return json.dumps({
-                "status": "error",
-                "code": "SESSION_EXPIRED",
-                "message": "세션이 만료되었습니다. 다시 로그인해주세요."
-            }, ensure_ascii=False)
 
         try:
             # 2. 회의실 예약 페이지 이동

@@ -6,6 +6,7 @@ requires-python = ">=3.13"
 dependencies = [
     "anyio==4.9.0",
     "apscheduler~=3.11.0",
+    "asyncio>=4.0.0",
     "beautifulsoup4==4.13.4",
     "bs4~=0.0.2",
     "certifi==2025.7.14",
@@ -26,6 +27,7 @@ dependencies = [
     "starlette==0.47.1",
     "uv==0.7.21",
     "uvicorn==0.35.0",
+    "redis>=5.2.0",
 ]
 
 [dependency-groups]

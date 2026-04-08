@@ -28,7 +28,7 @@ class LoginRequest(BaseModel):
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request, exc):
-    logger.error(f"Validation Error: {exc.errors()}") # 여기서 에러 원인이 찍힙니다!
+    logger.error(f"Validation Error: {exc.errors()}")
     return JSONResponse(
         status_code=422,
         content={"detail": exc.errors(), "body": exc.body},
@@ -50,7 +50,7 @@ async def login_endpoint(request: LoginRequest):
                     "user": None
                 }
 
-            save_session(data.get("userId"), cookies)
+            await save_session(data.get("userId"), cookies)
 
             # 성공 시 데이터 구조화
             return {

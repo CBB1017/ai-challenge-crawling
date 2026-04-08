@@ -153,8 +153,6 @@ class BaseCrawler:
         self.user_key = username or "anonymous"
         self.user_lock = None
     async def __aenter__(self):
-        # 1. 10개가 꽉 차면 11번째 요청은 여기서 대기(Blocking)합니다.
-        # 앞선 작업이 끝나서 자리가 나면 자동으로 실행을 이어갑니다.
         await crawler_semaphore.acquire()
         try:
             logger.debug(f"🚦 세마포어 획득")

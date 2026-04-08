@@ -108,14 +108,6 @@ class AttendanceCrawler(BaseCrawler):
             attendance_url = f"{LOGIN_INFO["domain"]}/AttendR2/AttendRegist"
             await self.page.goto(attendance_url)
 
-            # 1. 세션 체크
-            cached_cookies = get_session(username)
-            if not cached_cookies:
-                return json.dumps({
-                    "status": "error",
-                    "code": "SESSION_EXPIRED",
-                    "message": "세션이 만료되었습니다. 다시 로그인해주세요."
-                }, ensure_ascii=False)
             # 2. 부서(조직) 선택 (org_code가 있을 경우)
             if org_code:
                 logger.info(f"부서 변경 시도: {org_code}")
