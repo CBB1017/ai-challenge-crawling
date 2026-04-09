@@ -140,9 +140,9 @@ crawler_semaphore = asyncio.Semaphore(MAX_CONCURRENT_CRAWLERS)
 class BaseCrawler:
     def __init__(self,
                  cookies: list = None,
-                 username: Optional[str] = None,
+                 user_id: Optional[str] = None,
                  password: Optional[str] = None):
-        self.username = username
+        self.username = user_id
         self.password = password
         self.cookies = cookies or []  # 외부에서 전달받은 세션 쿠키
 
@@ -150,7 +150,7 @@ class BaseCrawler:
         self.context = None
         self.page = None
 
-        self.user_key = username or "anonymous"
+        self.user_key = user_id or "anonymous"
         self.user_lock = None
     async def __aenter__(self):
         await crawler_semaphore.acquire()
@@ -158,12 +158,12 @@ class BaseCrawler:
             logger.debug(f"🚦 세마포어 획득")
             await ContextPool.cleanup()
 
-            logger.debug("1. 브라우저 연결 시도")
-            self.browser = await cdp_manager.get_browser()
-
-            logger.debug(f"2. 유저 락 획득 시도: {self.user_key}")
+            logger.debug(f"1. 유저 락 획득 시도: {self.user_key}")
             self.user_lock = await UserLockPool.get_lock(self.user_key)
             await self.user_lock.acquire()
+
+            logger.debug("2. 브라우저 연결 시도")
+            self.browser = await cdp_manager.get_browser()
 
             logger.debug("3. 컨텍스트 생성/조회 시도")
             self.context = await ContextPool.get_or_create(

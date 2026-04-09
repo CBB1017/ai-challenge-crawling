@@ -53,9 +53,50 @@ def find_dept_code(user_input: str) -> None | str | tuple[str, str, str] | Any:
 
     return None
 class AttendanceCrawler(BaseCrawler):
-    def __init__(self, cookies: list = None):
-        super().__init__(cookies)
+    def __init__(self, cookies: list = None, user_id: str = None):
+        super().__init__(cookies, user_id)
 
+    async def fetch_team_attendance(self, ot_date: str = None, dept_name: str = None):
+        """0. 페이지 진입 전, 근태 데이터 사전 검증 (Fail-Fast)"""
+        if not self.cookies:
+            # 쿠키가 없으면 무조건 에러를 뱉고 뻗습니다.
+            # 프론트엔드는 이 에러를 받아 사용자를 로그인 창으로 튕겨냅니다.
+            logger.warning("유효한 세션(쿠키)이 없습니다. 프론트엔드 리다이렉트 필요.")
+            return {"status": "fail", "message": "세션이 만료되었습니다. 다시 로그인해주세요.", "code": "SESSION_EXPIRED"}
+
+        # 1. 필수 파라미터 체크
+        if not dept_name:
+            raise ValueError("부서명(dept_name)은 필수 입력 항목입니다.")
+        logger.info(f"부서 : {dept_name}, 날짜={ot_date}")
+
+        # 2. 유연한 부서 코드 검색
+        org_code = find_dept_code(dept_name)
+
+        if not org_code:
+            logger.error(f"부서를 찾을 수 없음: {dept_name}")
+            return {"status": "fail", "message": f"'{dept_name}'에 해당하는 부서를 찾을 수 없습니다.", "data": None}
+
+        # 3. 날짜 설정 (없으면 오늘)
+        target_date = ot_date if ot_date else date.today().isoformat()
+
+        logger.info(f"조회 시작: 부서={dept_name}(코드:{org_code}), 날짜={target_date}")
+
+        soup = await self.get_attendance_table_html(target_date, org_code)
+
+        if not soup:
+            return {"status": "fail", "message": f"{target_date} / {dept_name} 데이터 없음", "data": None}
+
+        # 6. 데이터 파싱
+        daily_results = self.parse_attendance_table_dynamic(soup)
+        mapped_rows = self.map_attendance_keys(daily_results)
+        team_grouped = self.group_by_team(mapped_rows)
+
+        return {
+            "status": "success",
+            "message": f"{target_date} 조회 성공",
+            "data": team_grouped,
+            "cookies": self.cookies
+        }
     async def fetch_attendance(self, ot_date: str = None, dept_name: str = None):
         """0. 페이지 진입 전, 근태 데이터 사전 검증 (Fail-Fast)"""
         if not self.cookies:
@@ -106,6 +147,48 @@ class AttendanceCrawler(BaseCrawler):
         """
         try:
             attendance_url = f"{LOGIN_INFO["domain"]}/AttendR2/AttendRegist"
+            await self.page.goto(attendance_url)
+
+            # 2. 부서(조직) 선택 (org_code가 있을 경우)
+            if org_code:
+                logger.info(f"부서 변경 시도: {org_code}")
+                # select 태그의 value 값을 선택하고 페이지 로딩 대기
+                await asyncio.gather(
+                    self.page.select_option('select[name="LookupOrgCode"]', value=str(org_code)),
+                    self.page.wait_for_load_state("networkidle")
+                )
+
+            # 3. 날짜 변경 로직 (target_date가 있을 경우)
+            if target_date:
+                logger.info(f"날짜 변경 시도: {target_date}")
+                # goToDay 함수 호출 후 페이지 로딩 대기
+                await asyncio.gather(
+                    self.page.evaluate(f"goToDay('{target_date}')"),
+                    self.page.wait_for_load_state("networkidle")
+                )
+
+            # 4. 최종 테이블 데이터 추출
+            # 페이지 로딩 후 테이블이 나타날 때까지 확실히 대기
+            await self.page.wait_for_selector('#objTblBody', timeout=5000)
+            table = await self.page.query_selector('#objTblBody')
+
+            if not table:
+                logger.error('[ERROR] 출석 테이블(#objTblBody) 없음')
+                return None
+
+            html = await table.inner_html()
+            return BeautifulSoup(f"<table>{html}</table>", "html.parser")
+
+        except Exception as e:
+            logger.error(f"[ERROR] table 크롤링 실패: {e}")
+            return None
+    async def get_attendance_table_html(self, target_date: str = None, org_code: str = None):
+        """
+        target_date: '2026-03-23' 형식 (None이면 오늘)
+        org_code: '9' (DX사업부), '17' (DX 1Team) 등 (None이면 기본값)
+        """
+        try:
+            attendance_url = f"{LOGIN_INFO["domain"]}/AttendR2/AttendReportPersonMonthByDate"
             await self.page.goto(attendance_url)
 
             # 2. 부서(조직) 선택 (org_code가 있을 경우)

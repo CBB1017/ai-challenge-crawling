@@ -39,7 +39,7 @@ async def login_endpoint(request: LoginRequest):
     """그룹웨어 로그인을 수행하고 유저 정보와 쿠키를 반환합니다."""
     logger.info(f"정적 로그인 시도 중...")
     try:
-        async with BaseCrawler(username=request.userId, password=request.password) as crawler:
+        async with BaseCrawler(user_id=request.userId, password=request.password) as crawler:
             success, cookies, data = await crawler.login()
 
             if not success:

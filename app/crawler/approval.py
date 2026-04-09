@@ -23,8 +23,8 @@ def normalize_ot_minute(minute_str: str) -> str:
 
 
 class ApprovalCrawler(BaseCrawler):
-    def __init__(self, cookies: list = None):
-        super().__init__(cookies)
+    def __init__(self, cookies: list = None, user_id: str = None):
+        super().__init__(cookies, user_id)
 
     async def process_overtime_request(
             self,
@@ -42,62 +42,62 @@ class ApprovalCrawler(BaseCrawler):
             logger.warning("유효한 세션(쿠키)이 없습니다. 프론트엔드 리다이렉트 필요.")
             return {"status": "fail", "message": "세션이 만료되었습니다. 다시 로그인해주세요.", "code": "SESSION_EXPIRED"}
 
-        # # 근태 크롤러로 해당 유저 데이터 조회
-        # async with AttendanceCrawler(self.cookies) as att_crawler:
-        #     att_result = await att_crawler.fetch_attendance(ot_date,dept_name)
-        #
-        # if att_result.get("status") != "success":
-        #     return {"status": "fail", "message": "근태 조회 실패"}
-        #
-        # # 타겟 유저 찾기
-        # target_member = next(
-        #     (m for members in att_result["data"].values() for m in members if m.get("memberName") == target_user_name),
-        #     None
-        # )
-        #
-        # if not target_member:
-        #     logger.warning(f"[{target_user_name}] 근태 기록을 찾을 수 없습니다.")
-        #     return {"status": "fail", "message": "근태 기록 없음"}
-        #
-        # # 2. OT 수행 여부 유효성 검사
-        # plan_in_out = target_member.get("planInOut", "09:00~18:00")
-        # actual_out = target_member.get("actualOut", "")  # ex: "21:30" 또는 ""
-        #
-        # if not actual_out:
-        #     logger.info(f"[{target_user_name}] 퇴근 기록이 없습니다. 상신 스킵.")
-        #     return {"status": "fail", "message": "퇴근 전(OT 미수행)"}
-        #
-        # try:
-        #     # 시작 시간 계산 (25시 이상 표기 지원이므로 % 24 제거)
-        #     plan_out_str = plan_in_out.split("~")[1].strip()
-        #     plan_out_h, plan_out_m = map(int, plan_out_str.split(":"))
-        #     ot_start_h = plan_out_h + 1
-        #     ot_start_m = plan_out_m
-        #
-        #     # 실제 퇴근 시간 30분 단위 내림 처리
-        #     actual_out_h, actual_out_m = map(int, actual_out.split(":"))
-        #     rounded_out_m = 30 if actual_out_m >= 30 else 0
-        #     rounded_out_h = actual_out_h
-        #
-        #     # 분 단위 환산 비교 (25시도 그대로 선형 계산됨)
-        #     start_total_mins = ot_start_h * 60 + ot_start_m
-        #     end_total_mins = rounded_out_h * 60 + rounded_out_m
-        #
-        #     # OT 인정 시간이 0분 이하인 경우 스킵 (예: 19:00 시작인데 19:25 퇴근 -> 내림 시 19:00)
-        #     if end_total_mins <= start_total_mins:
-        #         logger.info(
-        #             f"[{target_user_name}] 실제 퇴근({actual_out}) -> 인정 OT({rounded_out_h:02d}:{rounded_out_m:02d}) 미달. 상신 스킵.")
-        #         return {"status": "fail", "message": "OT 조건(30분) 미달"}
-        #
-        #     # 최종 폼에 입력할 OT 종료 시간
-        #     final_ot_end_hm = f"{rounded_out_h:02d}:{rounded_out_m:02d}"
-        #
-        #
-        # except Exception as e:
-        #     logger.error(f"시간 파싱 오류: {e}")
-        #     return {"status": "fail", "message": "시간 계산 오류"}
-        #
-        # logger.info(f"[{target_user_name}] OT 검증 통과. {ot_start_h:02d}:{ot_start_m:02d} ~ {final_ot_end_hm} 상신 진행.")
+        # 근태 크롤러로 해당 유저 데이터 조회
+        async with AttendanceCrawler(self.cookies) as att_crawler:
+            att_result = await att_crawler.fetch_attendance(ot_date,dept_name)
+
+        if att_result.get("status") != "success":
+            return {"status": "fail", "message": "근태 조회 실패"}
+
+        # 타겟 유저 찾기
+        target_member = next(
+            (m for members in att_result["data"].values() for m in members if m.get("memberName") == target_user_name),
+            None
+        )
+
+        if not target_member:
+            logger.warning(f"[{target_user_name}] 근태 기록을 찾을 수 없습니다.")
+            return {"status": "fail", "message": "근태 기록 없음"}
+
+        # 2. OT 수행 여부 유효성 검사
+        plan_in_out = target_member.get("planInOut", "09:00~18:00")
+        actual_out = target_member.get("actualOut", "")  # ex: "21:30" 또는 ""
+
+        if not actual_out:
+            logger.info(f"[{target_user_name}] 퇴근 기록이 없습니다. 상신 스킵.")
+            return {"status": "fail", "message": "퇴근 전(OT 미수행)"}
+
+        try:
+            # 시작 시간 계산 (25시 이상 표기 지원이므로 % 24 제거)
+            plan_out_str = plan_in_out.split("~")[1].strip()
+            plan_out_h, plan_out_m = map(int, plan_out_str.split(":"))
+            ot_start_h = plan_out_h + 1
+            ot_start_m = plan_out_m
+
+            # 실제 퇴근 시간 30분 단위 내림 처리
+            actual_out_h, actual_out_m = map(int, actual_out.split(":"))
+            rounded_out_m = 30 if actual_out_m >= 30 else 0
+            rounded_out_h = actual_out_h
+
+            # 분 단위 환산 비교 (25시도 그대로 선형 계산됨)
+            start_total_mins = ot_start_h * 60 + ot_start_m
+            end_total_mins = rounded_out_h * 60 + rounded_out_m
+
+            # OT 인정 시간이 0분 이하인 경우 스킵 (예: 19:00 시작인데 19:25 퇴근 -> 내림 시 19:00)
+            if end_total_mins <= start_total_mins:
+                logger.info(
+                    f"[{target_user_name}] 실제 퇴근({actual_out}) -> 인정 OT({rounded_out_h:02d}:{rounded_out_m:02d}) 미달. 상신 스킵.")
+                return {"status": "fail", "message": "OT 조건(30분) 미달"}
+
+            # 최종 폼에 입력할 OT 종료 시간
+            final_ot_end_hm = f"{rounded_out_h:02d}:{rounded_out_m:02d}"
+
+
+        except Exception as e:
+            logger.error(f"시간 파싱 오류: {e}")
+            return {"status": "fail", "message": "시간 계산 오류"}
+
+        logger.info(f"[{target_user_name}] OT 검증 통과. {ot_start_h:02d}:{ot_start_m:02d} ~ {final_ot_end_hm} 상신 진행.")
 
         """3. 검증 통과 시 페이지 이동 및 폼 작성"""
         approval_url = f"{groupware_domain}/Flow/Doc_Write?ActionGubun=APPEND&BoxNo=2&DocKind=2&RtnURL=Form_List?gubun=Doc&FormNo=147757&FormType=PH&FormName=3%2E%EC%9E%94%EC%97%85%2F%ED%8A%B9%EA%B7%BC%28OT%29%EC%8B%A0%EC%B2%AD%EC%84%9C"
@@ -109,7 +109,6 @@ class ApprovalCrawler(BaseCrawler):
 
         # 이미 계산된 시작/종료 시간을 전달하여 중복 조회 방지
         await self.fill_overtime_form(
-            target_user_name=target_user_name,
             ot_start_hm=f"{ot_start_h:02d}:{ot_start_m:02d}",
             ot_end_hm=actual_out,  # 실제 퇴근 시간을 OT 종료시간으로 자동 세팅
             ot_date=ot_date,
@@ -293,7 +292,6 @@ class ApprovalCrawler(BaseCrawler):
         logger.info("------------------------------")
     async def fill_overtime_form(
             self,
-            target_user_name: str,
             ot_start_hm: str,
             ot_end_hm: str,
             ot_date: str = None,

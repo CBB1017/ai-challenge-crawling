@@ -40,9 +40,12 @@ async def get_team_attendance(
         [주의] ot_date는 사용자가 명시적으로 날짜를 언급한 경우에만 YYYY-MM-DD 형식으로 입력하고, 언급이 없다면 절대 유추하지 말고 비워두세요.
     """
     logger.info("팀 근태 기록 조회 시작")
+    # 1. Meta에서 안전하게 user_id 추출 (이전에 수정한 방식)
+    meta = getattr(ctx.request_context, 'meta', None)
+    user_id = getattr(meta, "userId", None) if meta else "anonymous"
     logger.debug(f"get_team_attendance 호출됨 - 날짜: {ot_date}, 부서: {dept_name}")
 
-    async with AttendanceCrawler(cookies) as crawler:
+    async with AttendanceCrawler(cookies, user_id) as crawler:
         try:
             target_date = ot_date if ot_date else date.today().isoformat()
             result = await crawler.fetch_attendance(
@@ -161,9 +164,12 @@ async def request_overtime_approval(
         data = OvertimeRequestModel(**request_data)
         meta = getattr(ctx.request_context, 'meta', {}) or {}
 
-        user_id = meta.get("userId")
-        user_name = meta.get("userName")
-        dept_name = meta.get("userDept")
+        user_id = getattr(meta, "userId", None) if meta else None
+        user_name = getattr(meta, "userName", None) if meta else None
+        dept_name = getattr(meta, "userDept", None) if meta else None
+        # 필수 값 누락 체크 로직 (필요시 추가)
+        if not user_id:
+            raise ValueError("userId가 meta 정보에 없습니다.")
     except Exception as e:
         logger.error(f"데이터 파싱 에러(LLM 파라미터 누락): {str(e)}")
         # LLM에게 어떤 필드가 누락되었는지 피드백을 주어 스스로 수정하게 유도
@@ -175,7 +181,7 @@ async def request_overtime_approval(
 
     logger.info(f"OT 신청 시작 - 대상: {user_name}, 부서: {dept_name}, 날짜: {data.ot_date}, 액션: {data.action_type}")
     try:
-        async with ApprovalCrawler(cookies) as crawler:
+        async with ApprovalCrawler(cookies, user_id) as crawler:
             # 3. 폼 작성 및 결재선 설정 (이 내부에서 set_approval_line 등이 실행됨)
             # process_overtime_request가 내부에서 실패하면 이미 status='fail'인 result 반환
             result = await crawler.process_overtime_request(
