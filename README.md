@@ -26,3 +26,10 @@ docker push localhost:5000/my-app:latest
 ### API doc 
 http://localhost:8080/redoc
 http://localhost:8080/docs
+
+
+# # 🚨 [디버깅 1] 도착한 곳이 진짜 근태 페이지인지, 로그인 페이지인지 URL 확인
+# logger.info(f"[DEBUG] goto 직후 현재 URL: {self.page.url}")
+# 
+# # 🚨 [디버깅 2] 현재 화면 상태를 사진으로 찍어서 저장 (눈으로 직접 확인!)
+# await self.page.screenshot(path="debug_attendance_fail.png", full_page=True)

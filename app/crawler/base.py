@@ -31,11 +31,17 @@ class ContextPool:
             session = cls._pool.get(user_key)
 
             if session:
+                context = session["context"]
                 try:
+                    # 파이썬 메모리만 믿지 않고, 실제 컨텍스트가 닫혔는지 브라우저에 확인!
+                    # pages 속성을 조회하거나, 단순히 에러가 나는지 체크합니다.
+                    _ = context.pages
+
                     session["last_used"] = time.time()
-                    return session["context"]
-                except:
-                    logger.warning(f"⚠️ stale context 제거: {user_key}")
+                    return context
+                except Exception as e:
+                    # 객체가 죽어있다면 미련 없이 버립니다.
+                    logger.warning(f"⚠️ stale(죽은) context 감지됨, 제거합니다: {user_key} ({e})")
                     await cls.remove(user_key)
 
             if len(cls._pool) >= cls.MAX_POOL:
@@ -110,7 +116,7 @@ class _CDPConnectionManager:
                     try:
                         self.browser = await self.playwright.chromium.connect_over_cdp(
                             cdp_endpoint,
-                            timeout=10000
+                            timeout=100000
                         )
 
                         self.browser.on(

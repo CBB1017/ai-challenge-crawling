@@ -11,6 +11,18 @@ def format_minutes_to_readable(minutes):
     else:
         return f"{mins}분"
 
+
+def clean_user_name(name: str | None) -> str | None:
+    """이름 뒤에 붙은 직급을 제거하여 반환합니다."""
+    if not name:
+        return name
+
+    positions = ["팀장", "부장", "차장", "과장", "대리", "주임", "사원"]
+    for pos in positions:
+        if name.endswith(pos):
+            return name[:-len(pos)].strip()
+    return name.strip()
+
 def print_results(overtime_results, total_overtime, minus_consumed, all_entries):
     """개선된 결과 출력 함수"""
     logger.info("\n" + "=" * 100)

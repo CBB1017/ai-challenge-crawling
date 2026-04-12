@@ -20,13 +20,11 @@ def normalize_ot_minute(minute_str: str) -> str:
     except (ValueError, TypeError):
         return "00"
 
-
-
 class ApprovalCrawler(BaseCrawler):
     def __init__(self, cookies: list = None, user_id: str = None):
         super().__init__(cookies, user_id)
 
-    async def process_overtime_request(
+    async def process_oneday_overtime_request(
             self,
             target_user_name: str,
             dept_name: str,
@@ -197,9 +195,9 @@ class ApprovalCrawler(BaseCrawler):
                     logger.info(f"onclick fallback 실행: {search_keyword}")
                 return False
 
-            await popup.wait_for_timeout(1000)  # 0.5초에서 1초로 늘려 안정성 확보
+            await popup.wait_for_timeout(1000)
             # -----------------------------------------------------------
-            # 7. [치트키 발동] admin_main.CallLine() 직접 호출 및 에러 추적
+            # 7. admin_main.CallLine() 직접 호출 및 에러 추적
             # -----------------------------5t6------------------------------
             logger.info("자바스크립트 CallLine() 호출하여 데이터 스틸 시도...")
 
@@ -245,15 +243,15 @@ class ApprovalCrawler(BaseCrawler):
                 logger.error(f"CallLine() 실패 상세 원인: {result_obj['msg']}")
                 return False
 
-            # 10. [핵심 1] 팝업 안에서 부모를 건드리지 않고 조용히 닫기만 함!
+            # 10. 팝업 안에서 부모를 건드리지 않고 조용히 닫기만 함!
             logger.info("데이터 확보 완료. 팝업을 안전하게 종료합니다.")
             await popup.close()
 
-            # 11. [핵심 2] 부모 창으로 안전하게 복귀
+            # 11. 부모 창으로 안전하게 복귀
             await self.page.bring_to_front()
             logger.success("부모 창 복귀 성공. 셀프 서브밋을 준비합니다.")
 
-            # [핵심] 서브밋을 실행함과 동시에, 서버에서 Doc_Line_View 응답이 올 때까지 기다립니다.
+            # 서브밋을 실행함과 동시에, 서버에서 Doc_Line_View 응답이 올 때까지 기다립니다.
             # 이렇게 하면 프레임이 깨지든 말든 DOM 에러(Target closed)가 발생하지 않습니다.
             async with self.page.expect_response(lambda r: "Doc_Line_View" in r.url, timeout=10000):
                 await self.page.evaluate(f"""(val) => {{
@@ -282,14 +280,6 @@ class ApprovalCrawler(BaseCrawler):
             logger.error(f"결재라인 설정 실패: {e}")
             return False
 
-    async def debug_frames(self, page: Page):
-        logger.info("--- 현재 활성화된 프레임 목록 ---")
-        for i, frame in enumerate(page.frames):
-            try:
-                logger.debug(f"[{i}] Name: {frame.name}, URL: {frame.url[:50]}")
-            except:
-                logger.debug(f"[{i}] 프레임 정보 읽기 실패 (Closed)")
-        logger.info("------------------------------")
     async def fill_overtime_form(
             self,
             ot_start_hm: str,
@@ -370,3 +360,104 @@ class ApprovalCrawler(BaseCrawler):
             await self.page.wait_for_load_state("networkidle", timeout=5000)
         except:
             pass
+
+    async def process_monthly_overtime_request(
+            self,
+            target_user_name: str,
+            dept_name: str,
+            ot_data_list: list,  # [{'date': '2023-10-01', 'start': '19:00', 'end': '21:30', 'reason': '사유'}, ...]
+            doc_type: str = "OT",
+            memo: str = "."
+    ):
+        """월 단위 OT 상신 메인 파이프라인"""
+        groupware_domain = os.environ["GROUPWARE_DOMAIN"]
+
+        if not self.cookies:
+            logger.warning("유효한 세션(쿠키)이 없습니다.")
+            return {"status": "fail", "message": "세션 만료"}
+
+        # 1. 폼 페이지 진입
+        approval_url = f"{groupware_domain}/Flow/Doc_Write?ActionGubun=APPEND&BoxNo=2&DocKind=2&RtnURL=Form_List?gubun=Doc&FormNo=147757&FormType=PH&FormName=3%2E%EC%9E%94%EC%97%85%2F%ED%8A%B9%EA%B7%BC%28OT%29%EC%8B%A0%EC%B2%AD%EC%84%9C"
+        await self.page.goto(approval_url)
+
+        # 2. 결재선 설정
+        line_success = await self.set_approval_line(dept_name, doc_type)
+        if not line_success:
+            return {"status": "fail", "message": "결재라인 설정 실패"}
+
+        # 3. 월 단위 반복 폼 작성
+        await self.fill_monthly_overtime_form(target_user_name, ot_data_list, memo)
+
+        return {"status": "success", "message": "월 단위 OT 폼 세팅 완료", "cookies": self.cookies}
+
+    async def fill_monthly_overtime_form(self, my_name: str, ot_data_list: list, memo: str = "."):
+        """라인 추가를 반복하며 월단위 데이터를 입력하고 자동완성을 처리하는 로직"""
+        logger.info("--------------fill_monthly_overtime_form 시작----------------")
+
+        # await self.page.wait_for_selector("#AspFile", timeout=10000)
+        # frame = self.page.frame_locator("#AspFile")
+
+        for index, data in enumerate(ot_data_list):
+            logger.info(f"[{index + 1}/{len(ot_data_list)}] {data.get('date')} 데이터 세팅 중...")
+
+            # [1] 라인 추가 (첫 번째 데이터는 기본 줄이 있다고 가정, 2번째부터 라인추가 클릭)
+            if index > 0:
+                # '라인추가' 버튼 클릭
+                add_btn = self.page.locator('input[value="라인추가"]').last
+                await add_btn.click()
+
+                # 애니메이션/렌더링 딜레이 방지를 위해 잠시 대기
+                await self.page.wait_for_timeout(500)
+
+            # [2] 현재 작업할 행(Row) 특정
+            # 폼 구조에 따라 특정 클래스가 없다면 가장 마지막에 추가된 입력 영역 테이블 행을 찾습니다.
+            # (예: 라인 추가 버튼이 있는 tr의 바로 위 tr 등, 이 부분은 실제 html에 맞게 튜닝될 수 있습니다)
+            # 여기서는 편의상 input[name="emp_name"]을 포함하는 tr들을 리스트업해서 index로 접근합니다.
+            current_row = self.page.locator('tr:has(input[name="emp_name"])').nth(index)
+
+            # [3] 이름 입력 및 jQuery UI Autocomplete 처리
+            name_input = current_row.locator('input[name="emp_name"]')
+            # click 후 fill을 해야 자동완성 이벤트가 정상적으로 트리거되는 경우가 많음
+            await name_input.click()
+            await name_input.fill(my_name)
+
+            # 자동완성 ul 태그 출현 대기 (form 밖 <body> 끝에 주로 붙음)
+            # frame 내부에 렌더링되므로 frame.locator 사용
+            autocomplete_ul = self.page.locator('ul.ui-autocomplete')
+            await autocomplete_ul.wait_for(state="visible", timeout=5000)
+
+            # 드롭박스 내에서 내 이름이 포함된 div(wrapper) 찾아서 클릭
+            target_item = autocomplete_ul.locator(f'div.ui-menu-item-wrapper:has-text("{my_name}")').first
+            await target_item.click()
+
+            # 선택 후 드롭다운 닫히는지 확인 대기 (안정성 확보)
+            await autocomplete_ul.wait_for(state="hidden", timeout=3000)
+
+            # [4] 시간 계산 및 콤보박스 세팅
+            str_start_h, str_start_m = data['start'].split(":")
+            str_end_h, str_end_m = data['end'].split(":")
+            normalized_end_m = normalize_ot_minute(str_end_m)
+
+            # current_row(현재 줄) 안에서만 select를 찾으므로, 다른 줄의 데이터가 변경될 위험이 없음
+            await current_row.locator('select[name="startH"]').select_option(str_start_h)
+            await current_row.locator('select[name="startM"]').select_option(str_start_m)
+            await current_row.locator('select[name="endH"]').select_option(str_end_h)
+
+            try:
+                await current_row.locator('select[name="endM"]').select_option(normalized_end_m)
+            except Exception as e:
+                logger.warning(f"종료 분({normalized_end_m}) 선택 실패 → '00' fallback: {e}")
+                await current_row.locator('select[name="endM"]').select_option("00")
+
+            # 날짜 및 사유 등 추가 입력 (데이터 키값은 실제 attendance 파싱 결과에 맞게 맞춰주세요)
+            if 'date' in data:
+                await current_row.locator('input[name="otDate"]').fill(data['date'])
+            if 'reason' in data:
+                await current_row.locator('input[name="reason"]').fill(data['reason'])  # 사유 input name 확인 필요
+
+            # 필요에 따라 식대/야식 등 옵션 세팅
+            # await current_row.locator('select[name="otWorkGubun"]').select_option("10")
+
+        # [5] 전체 공통 메모 입력 (루프 종료 후 마지막에 한 번)
+        await self.page.locator('textarea[name="memo"]').fill(memo)
+        logger.success(f"월 단위 OT {len(ot_data_list)}건 입력 완벽하게 완료되었습니다.")

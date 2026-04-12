@@ -1,5 +1,65 @@
 import math
+import re
 from typing import Optional, List, Dict, Any, Tuple
+
+from loguru import logger
+
+
+# =====================================================================
+# [어댑터 1] 결재 상신용 포맷터
+# =====================================================================
+def get_list_for_submission(analyzed_data: Dict[str, Any], memo: str) -> List[Dict[str, str]]:
+    """
+    상계 처리가 끝난 후 '실제 상신해야 할' 데이터만 웹 폼 입력용 리스트로 변환합니다.
+    """
+    ot_data_list = []
+    for ot in analyzed_data['ot_pool']:
+        if ot['remain'] > 0:  # 상계되고 남은 시간이 있는 경우만
+            item = ot['info']
+            ot_start = item["adjusted_start"] if item.get("work_type") == "휴무일" else "19:00"
+
+            ot_data_list.append({
+                "date": item["day"].replace(".", "-"),
+                "start": ot_start,
+                "end": item["adjusted_end"],
+                "reason": memo
+            })
+    return ot_data_list
+
+
+# =====================================================================
+# [어댑터 2] 조회/보고서용 포맷터
+# =====================================================================
+def get_summary_for_report(analyzed_data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    사용자에게 근태 현황을 보여주기 위한 요약 데이터를 생성합니다.
+    """
+    ot_pool = analyzed_data['ot_pool']
+    ot_entries = analyzed_data['ot_entries']
+
+    results = []
+    total_overtime_minutes = 0
+
+    for ot in ot_pool:
+        if ot['remain'] > 0:
+            info = ot['info']
+            results.append({
+                'day': ot['day'],
+                'work_type': info['work_type'],
+                'overtime_hours': round(ot['remain'] / 60, 2),
+                'overtime_minutes': ot['remain'],
+                'consumed_by': ot['consumed_by'],
+            })
+            total_overtime_minutes += ot['remain']
+
+    # 필요에 따라 daily_details 등 추가 구성
+    return {
+        "results": results,
+        "total_overtime_minutes": total_overtime_minutes,
+        "minus_consumed": analyzed_data['minus_consumed'],
+        "total_overtime_hours": round(total_overtime_minutes / 60, 2)
+    }
+
 
 class OvertimeCalculator:
     def __init__(self):
@@ -61,6 +121,164 @@ class OvertimeCalculator:
 
         net_work_minutes = total_minutes - lunch_break - dinner_break
         return max(0, net_work_minutes), lunch_break, dinner_break
+
+    def analyze_attendance(self, attendance_data: List[Dict[str, Any]], exclude_approved: bool = True) -> Dict[
+        str, Any]:
+        """
+        [공통 코어 로직]
+        근태 데이터를 순회하며 시간 계산 및 Minus OT 상계 처리를 수행합니다.
+        exclude_approved: True면 이미 결재된 내역은 상계/상신 풀에서 제외합니다.
+        """
+        ot_entries = []
+        logger.info(f"=== 근태 분석 시작 (총 {len(attendance_data)}건) ===")
+
+        for record in attendance_data:
+            # 🚨 보내주신 실제 데이터 구조에 맞게 키(Key) 완벽 매핑
+            raw_day = record.get('일자', 'Unknown')
+            plan_time = record.get('출근~퇴근', '09:00~18:00')  # 근무계획 - 출퇴근시간
+            actual_time = record.get('출근~퇴근_1', '~')  # 근무실적 - 출퇴근시간 (중복키)
+            work_type = record.get('근무구분', '근무일')  # 근무계획 - 근무구분
+            result_type = record.get('근무구분_1', work_type)  # 근무실적 - 근무구분 (중복키, 예: '보상종일')
+            ot_approval = record.get('전자결재', '')  # OT 전자결재 상태
+            vacation = record.get('휴가', '')  # 휴가 상태 (예: '승인')
+
+            # '4\xa0일(水)' 등에서 숫자('4')만 추출
+            day_match = re.search(r'\d+', raw_day)
+            day = day_match.group() if day_match else '0'
+
+            logger.debug(f"[{day}일] ----------------------------------------")
+            logger.debug(
+                f"[{day}일] 원본: 실적={actual_time}, 계획={plan_time}, 계획구분={work_type}, 실적구분={result_type}, 휴가='{vacation}', 결재='{ot_approval}'")
+
+            # 1. 기결재 내역 스킵 분기 (OT 결재가 이미 된 경우)
+            if exclude_approved and any(status in ot_approval for status in ['승인', '상신', '결재중']):
+                logger.info(f"[{day}일] ⏭️ 스킵됨: 이미 결재가 진행/완료된 내역 ({ot_approval})")
+                continue
+
+            # 휴가(연차/보상종일 등)가 '승인'된 날짜의 부족 근무(Minus OT)를 잡지 않게 방어
+            if vacation == '승인':
+                logger.info(f"[{day}일] ⏭️ 스킵됨: 휴가 승인일")
+                continue
+
+            try:
+                work_start, work_end = actual_time.split('~')
+                work_start, work_end = work_start.strip(), work_end.strip()
+            except ValueError:
+                logger.debug(f"[{day}일] ❌ 시간 파싱 실패 (actual_time: {actual_time})")
+                continue
+
+            original_start_min = self.time_to_minutes(work_start)
+            original_end_min = self.time_to_minutes(work_end)
+
+            if original_start_min is None or original_end_min is None:
+                logger.debug(f"[{day}일] ❌ 유효하지 않은 출퇴근 시간 (start:{work_start}, end:{work_end})")
+                continue
+
+            # 30분 단위 절사 적용
+            adjusted_start_min = self.round_up_to_30(original_start_min)
+            adjusted_end_min = self.round_down_to_30(original_end_min)
+
+            logger.debug(
+                f"[{day}일] 시간 정규화: 출근({work_start} -> {self.minutes_to_time(adjusted_start_min)}), 퇴근({work_end} -> {self.minutes_to_time(adjusted_end_min)})")
+
+            if adjusted_end_min <= adjusted_start_min:
+                logger.debug(f"[{day}일] ❌ 퇴근시간이 출근시간보다 같거나 빠름. 계산 스킵.")
+                continue
+
+            ot_minutes, minus_ot, lunch_break, dinner_break, net_work_minutes = 0, 0, 0, 0, 0
+
+            # 2. 근무 유형별 OT 계산 (계획된 work_type 기준)
+            if work_type == '휴무일':
+                net_work_minutes, lunch_break, dinner_break = self.calculate_work_and_breaks(
+                    adjusted_start_min, adjusted_end_min
+                )
+                ot_minutes = self.round_down_to_30(net_work_minutes)
+                logger.debug(f"[{day}일] 🏖️ 휴무일 근무: 순근무={net_work_minutes}분, 산정OT={ot_minutes}분")
+            else:
+                # 반차, 연차, 반반차 등 휴가 사용 여부 식별
+                is_vacation_day = (vacation == '승인' or any(kw in result_type for kw in ['반차', '연차', '종일', '경조', '휴가']))
+                try:
+                    _, p_end_str = plan_time.split('~')
+                    plan_end_min = self.time_to_minutes(p_end_str.strip())
+                except ValueError:
+                    plan_end_min = self.time_to_minutes('18:00')
+
+                # 저녁 식사 1시간 강제 공제 반영 위치
+                ot_start_baseline = plan_end_min + 60
+
+                logger.debug(
+                    f"[{day}일] 🏢 평일 근무 기준: 계획퇴근={self.minutes_to_time(plan_end_min)}, OT인정시작={self.minutes_to_time(ot_start_baseline)} (저녁휴게 60분 포함)")
+
+                if adjusted_end_min > ot_start_baseline:
+                    ot_minutes = adjusted_end_min - ot_start_baseline
+                    dinner_break = 60
+                    logger.info(
+                        f"[{day}일] ✅ OT 발생! 퇴근({self.minutes_to_time(adjusted_end_min)}) - OT시작({self.minutes_to_time(ot_start_baseline)}) = {ot_minutes}분")
+                else:
+                    logger.debug(
+                        f"[{day}일] ❌ OT 미발생 (실제퇴근 {self.minutes_to_time(adjusted_end_min)} <= OT인정시작 {self.minutes_to_time(ot_start_baseline)})")
+
+                # 부족 근무 계산 시 휴가/반차 사용자는 페널티 면제
+                if adjusted_end_min < plan_end_min:
+                    if is_vacation_day:
+                        logger.info(
+                            f"[{day}일] 🌴 휴가/반차 사용일: 일찍 퇴근했지만 부족 근무(Minus OT) 페널티를 면제합니다. (구분: {result_type})")
+                    else:
+                        overtime_diff = adjusted_end_min - plan_end_min
+                        minus_ot = -math.ceil(-overtime_diff / 30) * 30
+                        logger.info(
+                            f"[{day}일] ⚠️ 부족 근무 발생: 계획({self.minutes_to_time(plan_end_min)}) - 실제({self.minutes_to_time(adjusted_end_min)}) -> 페널티 {minus_ot}분")
+                lunch_break = 60 if (adjusted_end_min - adjusted_start_min) > 240 else 0
+                net_work_minutes = max(0, (adjusted_end_min - adjusted_start_min) - lunch_break - dinner_break)
+
+            ot_entries.append({
+                'day': day,
+                'work_type': work_type,
+                'result_type': result_type,
+                'original_start': work_start,
+                'original_end': work_end,
+                'adjusted_start': self.minutes_to_time(adjusted_start_min),
+                'adjusted_end': self.minutes_to_time(adjusted_end_min),
+                'net_work_minutes': net_work_minutes,
+                'lunch_break': lunch_break,
+                'dinner_break': dinner_break,
+                'ot_minutes': ot_minutes,
+                'minus_ot': minus_ot,
+                'vacation': vacation,
+                'ot_approval': ot_approval
+            })
+
+            # 3. Minus OT 상계 처리
+        logger.info("=== 부족 근무(Minus OT) 상계 처리 시작 ===")
+        pos_ot = [entry for entry in ot_entries if entry['ot_minutes'] > 0]
+        neg_ot = [entry for entry in ot_entries if entry['minus_ot'] < 0]
+
+        minus_consumed = []
+        ot_pool = [{'day': entry['day'], 'remain': entry['ot_minutes'], 'info': entry, 'consumed_by': []} for entry in
+                   pos_ot]
+
+        for entry in neg_ot:
+            need_absorb = -entry['minus_ot']
+            logger.debug(f"⚠️ [{entry['day']}일] 부족근무 {need_absorb}분 상계 진행")
+
+            i = 0
+            while need_absorb > 0 and i < len(ot_pool):
+                if ot_pool[i]['remain'] > 0:
+                    use = min(ot_pool[i]['remain'], need_absorb)
+                    ot_pool[i]['remain'] -= use
+                    need_absorb -= use
+                    ot_pool[i]['consumed_by'].append({'day': entry['day'], 'used': use})
+                    logger.info(f"  -> 🔄 [{ot_pool[i]['day']}일]의 OT에서 {use}분 차감 (남은 OT: {ot_pool[i]['remain']}분)")
+                i += 1
+            minus_consumed.append({'day': entry['day'], 'amount': -entry['minus_ot']})
+
+        logger.info("=== 근태 분석 완료 ===")
+
+        return {
+            "ot_entries": ot_entries,
+            "ot_pool": ot_pool,
+            "minus_consumed": minus_consumed
+        }
 
     def calculate_overtime(self, attendance_data: List[Dict[str, Any]]) -> Dict[str, Any]:
         """초과근무 계산 메인 로직"""
