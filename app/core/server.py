@@ -9,9 +9,7 @@ from loguru import logger
 from mcp.server.fastmcp import FastMCP, Context
 
 from app.core.config import LOGIN_INFO
-from app.core.scheduler import is_weekend, is_holiday, annotate_member_status, all_checked_in, should_reset_today, \
-    calculate_dynamic_schedule_times
-from app.core.utils import clean_user_name, print_results
+from app.core.utils import clean_user_name
 from app.crawler.approval import ApprovalCrawler
 from app.crawler.attendance import AttendanceCrawler
 from app.crawler.meeting import MeetingRoomCrawler
@@ -19,7 +17,6 @@ from app.crawler.member import MemberCrawler
 from app.crawler.overtime import OvertimeCalculator, get_list_for_submission, get_summary_for_report
 from app.models.models import OvertimeRequestModel
 from app.session.session_manage_decorator import requires_cookies
-from app.session.session_manager import get_session
 
 load_dotenv()
 
@@ -27,13 +24,14 @@ load_dotenv()
 current_username = contextvars.ContextVar("current_username", default=None)
 mcp = FastMCP("crawler-server")
 
+
 @mcp.tool()
 @requires_cookies
 async def get_team_attendance(
         dept_name: str,
         ot_date: Optional[str] = None,
         ctx: Context = None,
-        cookies: dict = None
+        cookies: list = None
 ) -> str:
     """
         팀 멤버들의 근태 기록을 조회합니다.
@@ -41,7 +39,7 @@ async def get_team_attendance(
         [주의] ot_date는 사용자가 명시적으로 날짜를 언급한 경우에만 YYYY-MM-DD 형식으로 입력하고, 언급이 없다면 절대 유추하지 말고 비워두세요.
     """
     logger.info("팀 근태 기록 조회 시작")
-    # 1. Meta에서 안전하게 user_id 추출 (이전에 수정한 방식)
+    # 1. Meta에서 안전하게 user_id 추출
     meta = getattr(ctx.request_context, 'meta', None)
     user_id = getattr(meta, "userId", None) if meta else "anonymous"
     logger.debug(f"get_team_attendance 호출됨 - 날짜: {ot_date}, 부서: {dept_name}")
@@ -65,7 +63,7 @@ async def get_team_attendance(
 async def get_meeting_room_status(
         room_name: str,
         ctx: Context = None,
-        cookies: dict = None
+        cookies: list = None
 ) -> str:
     """회의실 예약 현황을 조회합니다."""
     logger.info(f"회의실 조회 요청: {room_name}")
@@ -79,7 +77,7 @@ async def get_meeting_room_status(
 @requires_cookies
 async def get_team_members(
         ctx: Context = None,
-        cookies: dict = None
+        cookies: list = None
 ) -> str:
     """조직도(팀 및 멤버정보)와 이메일 정보를 병합하여 JSON으로 반환합니다.
      (이 함수는 별도의 파라미터 입력이 필요하지 않으며, 시스템 설정값을 사용합니다.)
@@ -94,7 +92,7 @@ async def get_team_members(
 async def calculate_overtime_data(
         attendance_data: list[dict],
         ctx: Context = None,
-        cookies: dict = None
+        cookies: list = None
 ) -> str:
     """
     크롤링된 근태 데이터를 기반으로 초과 근무(OT) 및 부족 근무 상쇄 결과를 계산합니다.
@@ -147,7 +145,7 @@ async def overtime_calculate_monthly(
         target_year: str,
         target_month: str,
         ctx: Context = None,
-        cookies: dict = None
+        cookies: list = None
 ) -> str:
     """
     월별 OT(초과근무=야근) 총 시간을 계산하는 크롤링 도구입니다.
@@ -207,12 +205,14 @@ async def overtime_calculate_monthly(
     except Exception as e:
         logger.exception("월별 OT 시간 계산 도구 실행 중 오류")
         return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
+
+
 @mcp.tool()
 @requires_cookies
 async def request_overtime_approval(
         request_data: dict,  # dict가 아닌 Pydantic 모델 지정
         ctx: Context = None,
-        cookies: dict = None  # 🚀 데코레이터가 주입해주는 값을 받을 자리!
+        cookies: list = None  # 🚀 데코레이터가 주입해주는 값을 받을 자리!
 ) -> str:
     """
     그룹웨어에서 잔업(OT) 또는 특근 신청서를 자동으로 작성하고 임시저장하거나 결재를 상신합니다.
@@ -246,7 +246,8 @@ async def request_overtime_approval(
             "details": str(e)
         }, ensure_ascii=False)
 
-    logger.info(f"OT 신청 시작 - 대상: {user_name}, 부서: {dept_name}, 유형: {data.request_type}, 날짜: {data.ot_date},{data.target_year}-{data.target_month}, 액션: {data.action_type}")
+    logger.info(
+        f"OT 신청 시작 - 대상: {user_name}, 부서: {dept_name}, 유형: {data.request_type}, 날짜: {data.ot_date},{data.target_year}-{data.target_month}, 액션: {data.action_type}")
     try:
         ot_data_list = []  # 월 단위 데이터를 담을 변수
 
@@ -288,7 +289,7 @@ async def request_overtime_approval(
             # [분기 1] 월단위 처리 (위에서 가져온 ot_data_list 주입)
             if data.request_type == "monthly":
                 result = await crawler.process_monthly_overtime_request(
-                    target_user_name=raw_user_name, # 문병찬
+                    target_user_name=raw_user_name,  # 문병찬
                     dept_name=dept_name,
                     ot_data_list=ot_data_list,
                     doc_type=data.doc_type,
@@ -298,7 +299,7 @@ async def request_overtime_approval(
             # [분기 2] 단일 날짜 처리
             else:
                 result = await crawler.process_oneday_overtime_request(
-                    target_user_name=user_name, # 문병찬대리
+                    target_user_name=user_name,  # 문병찬대리
                     dept_name=dept_name,
                     doc_type=data.doc_type,
                     ot_date=data.ot_date,

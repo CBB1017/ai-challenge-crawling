@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from app.core.config import LoggingMiddleware
 from app.core.server import mcp
 from app.crawler.base import BaseCrawler
-from app.session.session_manager import save_session, get_session
+from app.session.session_manager import save_session
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
