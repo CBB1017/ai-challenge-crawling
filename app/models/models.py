@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta
-from typing import Optional, Literal, Any
+from typing import Optional, Literal, Any, List
 
 from pydantic import BaseModel, Field, AliasChoices, field_validator, model_validator
 
@@ -8,6 +8,7 @@ class ActionEnum(str):
     attendance = "attendance"
     meeting_room = "meeting-room"
     checkin_missing = "checkin-missing"
+
 
 class CrawlRequest(BaseModel):
     id: str
@@ -124,3 +125,105 @@ class OvertimeRequestModel(BaseModel):
             except (ValueError, TypeError):
                 raise ValueError("연도와 월이 정상적으로 계산되지 않았습니다.")
         return self
+
+class LeaveItemModel(BaseModel):
+    leave_type: str = Field(
+        default="연차",
+        description="휴가 종류: '연차', '반차', '경조', '출산', '병가', '공가', '장기근속포상휴가', '대체휴가', '특별휴가', '휴직', '반반차', '하기휴가', '생일휴가', '기타휴가', '보상휴가(종일)', '보상휴가(반일)'"
+    )
+
+    start_date: Optional[Any] = Field(
+        default=None,
+        validation_alias=AliasChoices('start_date', 'date'),
+        description="휴가 시작일(YYYY-MM-DD)."
+    )
+
+    end_date: Optional[Any] = Field(
+        default=None,
+        description="휴가 종료일(YYYY-MM-DD)."
+    )
+
+    # 🚨 반차 / 보상휴가(반일) 전용 필드
+    half_day_type: Optional[Literal["오전", "오후"]] = Field(
+        default=None,
+        description="반차나 보상휴가(반일)일 경우 '오전' 또는 '오후' 선택"
+    )
+
+    # 🚨 반반차 전용 필드 (HH:MM)
+    start_time: Optional[str] = Field(
+        default=None,
+        description="반반차 시작 시간 (예: '08:30')."
+    )
+    end_time: Optional[str] = Field(
+        default=None,
+        description="반반차 종료 시간 (예: '10:30')."
+    )
+
+    memo: str = Field(default=".")
+
+    @model_validator(mode='before')
+    @classmethod
+    def preprocess_item(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+
+        now = datetime.now()
+
+        # 1. 자연어 날짜 처리
+        for date_field in ['start_date', 'end_date']:
+            val = data.get(date_field)
+            if isinstance(val, str):
+                if '오늘' in val or '금일' in val:
+                    data[date_field] = now.strftime("%Y-%m-%d")
+                elif '내일' in val or '명일' in val:
+                    data[date_field] = (now + timedelta(days=1)).strftime("%Y-%m-%d")
+                elif '모레' in val:
+                    data[date_field] = (now + timedelta(days=2)).strftime("%Y-%m-%d")
+
+        # 필수 값 방어: start_date가 없으면 오늘로, end_date가 없으면 start_date와 동일하게
+        if not data.get('start_date'):
+            data['start_date'] = now.strftime("%Y-%m-%d")
+        if not data.get('end_date'):
+            data['end_date'] = data['start_date']
+        if data.get('leave_type'):
+            data['leave_type'] = data['leave_type'].replace(" ", "")
+        # 2. 반차/보상휴가(반일) 디폴트 처리
+        l_type = data.get('leave_type', '연차')
+        if l_type in ['반차', '보상휴가(반일)']:
+            if not data.get('half_day_type'):
+                data['half_day_type'] = "오후"  # 기본값을 오후로 (필요시 오전으로 변경)
+
+        # 3. 반반차 디폴트 및 자동 2시간 계산 로직
+        if l_type == '반반차':
+            s_time = data.get('start_time')
+            if not s_time:
+                # 사용자가 시간을 안 주면 디폴트 근무 시작시간(예: 08:30)으로 세팅
+                s_time = "08:30"
+                data['start_time'] = s_time
+
+            # 종료 시간이 없으면 시작 시간 기준 2시간 뒤로 자동 세팅
+            if not data.get('end_time'):
+                try:
+                    time_obj = datetime.strptime(s_time, "%H:%M")
+                    data['end_time'] = (time_obj + timedelta(hours=2)).strftime("%H:%M")
+                except ValueError:
+                    data['end_time'] = "10:30"
+
+        return data
+
+
+# 전체 상신을 감싸는 루트 모델
+class LeaveRequestModel(BaseModel):
+    action_type: Literal["T", "F"] = Field(default="T")
+
+    # 여러 개의 휴가를 리스트로 받음
+    leave_data_list: List[LeaveItemModel] = Field(
+        description="신청할 휴가 목록. '월요일 연차랑 화요일 오전 반차 올려줘'처럼 여러 개를 요청하면 리스트에 2개의 객체를 만드세요."
+    )
+
+    @field_validator('action_type', mode='before')
+    @classmethod
+    def transform_action_type(cls, v):
+        if isinstance(v, bool):
+            return "T" if v else "F"
+        return v

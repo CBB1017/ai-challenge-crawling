@@ -1,10 +1,7 @@
 import asyncio
 import os
-import re
-import urllib.parse
 from datetime import datetime
 from loguru import logger
-from playwright.async_api import Page
 
 from app.crawler.attendance import AttendanceCrawler
 from app.crawler.base import BaseCrawler
@@ -115,14 +112,13 @@ class ApprovalCrawler(BaseCrawler):
 
         return {"status": "success", "message": "OT 폼 세팅 완료", "cookies": self.cookies}
 
-    async def set_approval_line(self, dept_name: str, doc_type: str) -> bool:
+    async def set_approval_line(self, dept_name: str, doc_type: str, form_no: str) -> bool:
         dept_map = {
             "DX": "DX사업부",
             "AI": "AI사업부",
             "이미징": "이미징솔루션그룹",
             "경영": "경영관리부"
         }
-
         target_dept = next(
             (v for k, v in dept_map.items() if k in dept_name.upper()),
             dept_name
@@ -259,7 +255,7 @@ class ApprovalCrawler(BaseCrawler):
                             if (frm) {{
                                 frm.SignList.value = val;
                                 frm.target = 'DocWrite_Line';
-                                frm.action = 'Doc_Line_View?FormNo=147757&NowBuseo=29&SignList=' + encodeURIComponent(val);
+                                frm.action = 'Doc_Line_View?FormNo={form_no}&NowBuseo=29&SignList=' + encodeURIComponent(val);
                                 frm.submit();
                             }}
                         }}""", v_list)
@@ -389,6 +385,36 @@ class ApprovalCrawler(BaseCrawler):
         await self.fill_monthly_overtime_form(target_user_name, ot_data_list, memo)
 
         return {"status": "success", "message": "월 단위 OT 폼 세팅 완료", "cookies": self.cookies}
+    async def process_leave_request(
+            self,
+            dept_name: str,
+            leave_data_list: list,  # [{'date': '2023-10-01', 'start': '19:00', 'end': '21:30', 'reason': '사유'}, ...]
+    ):
+        """휴가 상신 메인 파이프라인"""
+        groupware_domain = os.environ["GROUPWARE_DOMAIN"]
+        form_no = '147758'
+
+        if not self.cookies:
+            logger.warning("유효한 세션(쿠키)이 없습니다.")
+            return {"status": "fail", "message": "세션 만료"}
+
+        # 1. 폼 페이지 진입
+        approval_url = f"{groupware_domain}/Flow/Doc_Write?ActionGubun=APPEND&BoxNo=2&DocKind=2&RtnURL=Form_List?gubun=Doc&FormNo={form_no}&FormType=PH&FormName=4%2E%ED%9C%B4%EA%B0%80%EC%8B%A0%EC%B2%AD%EC%84%9C"
+        await self.page.goto(approval_url)
+
+        # 2. 결재선 설정
+        line_success = await self.set_approval_line(dept_name, "휴가", form_no)
+        if not line_success:
+            return {"status": "fail", "message": "결재라인 설정 실패"}
+
+        # 3. 월 단위 반복 폼 작성
+        form_result = await self.fill_leave_form(leave_data_list)
+
+        # 실패 시 바로 에러 반환
+        if form_result.get("status") == "fail":
+            return form_result
+
+        return {"status": "success", "message": "휴가 폼 세팅 완료", "cookies": self.cookies}
 
     async def fill_monthly_overtime_form(self, my_name: str, ot_data_list: list, memo: str = "."):
         """라인 추가를 반복하며 월단위 데이터를 입력하고 자동완성을 처리하는 로직"""
@@ -461,3 +487,101 @@ class ApprovalCrawler(BaseCrawler):
         # [5] 전체 공통 메모 입력 (루프 종료 후 마지막에 한 번)
         await self.page.locator('textarea[name="memo"]').fill(memo)
         logger.success(f"월 단위 OT {len(ot_data_list)}건 입력 완벽하게 완료되었습니다.")
+
+    async def fill_leave_form(self, leave_data_list: list):
+        """
+        휴가 데이터를 순회하며 라인을 추가하고, 동적 콤보박스 및 사유를 입력합니다.
+        leave_data_list 안의 데이터는 Pydantic 객체(LeaveItemModel) 기준입니다.
+        """
+        logger.info("--------------fill_leave_form 시작----------------")
+
+        # await self.page.wait_for_selector("#AspFile", timeout=10000)
+        # frame = self.page.frame_locator("#AspFile")
+
+        for index, item in enumerate(leave_data_list):
+            logger.info(f"[{index + 1}/{len(leave_data_list)}] {item.start_date} ({item.leave_type}) 세팅 중...")
+
+            # [1] 라인 추가 (2번째 휴가부터 '추가사용' 버튼 클릭)
+            if index > 0:
+                add_btn = self.page.locator('button:has-text("추가사용"), input[value="추가사용"]').last
+                await add_btn.click()
+                await self.page.wait_for_timeout(500)
+
+            # [2] 현재 작업할 행(Row) 특정
+            # 화면에 "실제로 보이는" select 박스와 textarea만 순서대로 가져옵니다.
+            current_select = self.page.locator('select[name="holidayCode"]').nth(index)
+            current_row = current_select.locator('xpath=./ancestor::tr')
+            memo_area = self.page.locator('textarea[name="memo"]').nth(index)
+            logger.info(f"{current_select} ({current_row})({memo_area}) 세팅 중...")
+
+            # 🚨 [3] 휴가 종류 세팅 (자바스크립트 다이렉트 추출 방식으로 속도/안정성 극대화)
+            safe_leave_type = item.leave_type.replace(" ", "")
+            base_name = "보상휴가" if "보상휴가" in safe_leave_type else safe_leave_type
+
+            # JS를 DOM에 직접 쏴서 가장 정확한 value 값을 0.01초 만에 뽑아옵니다.
+            option_val = await current_select.evaluate(f'''(select) => {{
+                    const options = Array.from(select.options);
+                    const target = options.find(opt => {{
+                        if (opt.getAttribute("holiday-name") !== "{base_name}") return false;
+                        if ("{safe_leave_type}".includes("종일") && !opt.text.includes("(종일)")) return false;
+                        if ("{safe_leave_type}".includes("반일") && !opt.text.includes("(반일)")) return false;
+                        return true;
+                    }});
+                    return target ? target.value : null;
+                }}''')
+
+            if option_val:
+                await current_select.select_option(value=option_val)
+            else:
+                logger.error(f"'{safe_leave_type}' 옵션을 찾을 수 없습니다. (데이터 또는 권한 확인)")
+                return {"status": "fail", "message": "옵션을 찾을 수 없습니다. (데이터 또는 권한 확인)"}
+
+            # 동적 콤보박스 렌더링 대기
+            await self.page.wait_for_timeout(500)
+
+            # [4] 시작일/종료일 세팅 (readonly 우회 - 기존 코드 유지)
+            start_input = current_row.locator('input[name="startHoliday"]')
+            end_input = current_row.locator('input[name="endHoliday"]')
+            await start_input.evaluate(
+                f"(el) => {{ el.value = '{item.start_date}'; el.dispatchEvent(new Event('change', {{ bubbles: true }})); }}")
+            await end_input.evaluate(
+                f"(el) => {{ el.value = '{item.end_date}'; el.dispatchEvent(new Event('change', {{ bubbles: true }})); }}")
+
+            # 🚨 [5] 휴가 종류별 동적 콤보박스 처리 (이 부분도 JS 추출 방식으로 안정화)
+            if safe_leave_type in ["반차", "보상휴가(반일)"]:
+                half_type = item.half_day_type if item.half_day_type else "오후"
+                tz_select = current_row.locator('select[name="SelTimeZone"]')
+
+                tz_val = await tz_select.evaluate(f'''(select) => {{
+                        const target = Array.from(select.options).find(opt => opt.text.includes("{half_type}"));
+                        return target ? target.value : null;
+                    }}''')
+
+                if tz_val:
+                    await tz_select.select_option(value=tz_val)
+                    logger.debug(f"반차 유형 세팅 완료: {half_type}")
+                else:
+                    logger.warning(f"오전/오후 콤보박스 값을 찾을 수 없습니다: {half_type}")
+                    return {"status": "fail", "message": "오전/오후 콤보박스 값을 찾을 수 없습니다"}
+
+            elif safe_leave_type == "반반차":
+                s_h, s_m = item.start_time.split(":")
+                e_h, e_m = item.end_time.split(":")
+
+                time_selects = current_row.locator('td[td-name="TimeTerm"] select')
+                try:
+                    await time_selects.nth(0).select_option(label=s_h)
+                    await time_selects.nth(1).select_option(label=s_m)
+                    await time_selects.nth(2).select_option(label=e_h)
+                    await time_selects.nth(3).select_option(label=e_m)
+                    logger.debug(f"반반차 시간 세팅 완료: {s_h}:{s_m} ~ {e_h}:{e_m}")
+                except Exception as e:
+                    logger.error(f"반반차 시간 콤보박스 세팅 실패: {e}")
+                    return {"status": "fail", "message": "반반차 시간 콤보박스 세팅 실패"}
+
+            # [6] 사유(Memo) 입력
+            await memo_area.click()
+            await memo_area.fill(item.memo)
+
+        logger.success(f"휴가 신청 폼 {len(leave_data_list)}건 입력 완벽하게 완료되었습니다.")
+        return {"status": "success", "message": "폼 작성 완료"}

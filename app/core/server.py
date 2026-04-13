@@ -15,7 +15,7 @@ from app.crawler.attendance import AttendanceCrawler
 from app.crawler.meeting import MeetingRoomCrawler
 from app.crawler.member import MemberCrawler
 from app.crawler.overtime import OvertimeCalculator, get_list_for_submission, get_summary_for_report
-from app.models.models import OvertimeRequestModel
+from app.models.models import OvertimeRequestModel, LeaveRequestModel
 from app.session.session_manage_decorator import requires_cookies
 
 load_dotenv()
@@ -357,4 +357,105 @@ async def request_overtime_approval(
 
     except Exception as e:
         logger.exception("OT 신청 도구 실행 중 오류")
+        return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
+
+
+@mcp.tool()
+@requires_cookies
+async def request_for_leave(
+        request_data: dict,
+        ctx: Context = None,
+        cookies: list = None
+) -> str:
+    """
+    그룹웨어에서 휴가 신청서를 자동으로 작성하고 임시저장하거나 결재를 상신합니다.
+
+    [사용 시기]
+    - 사용자가 하나 또는 여러 개의 휴가를 신청해달라고 요청할 때 호출합니다.
+    - 예: "내일 연차 신청해줘", "월요일 반반차(오전 10시)랑 수요일 보상휴가(반일) 올려줘", "23일, 24일 연차 쓸게"
+    - 잔업, 특근, 야근, OT 신청에는 절대 사용하지 마세요.
+
+    [주의 사항]
+    - action_type은 반드시 결재상신이면 'F', 임시저장이면 'T'로 매핑하세요.
+    - leave_data_list 안에 각각의 휴가 내역을 담아야 합니다.
+    - 반차는 half_day_type("오전"|"오후"), 반반차는 start_time("HH:MM")을 반드시 파악해서 넣으세요.
+    """
+    try:
+        # 리스트가 포함된 전체 모델 파싱
+        data = LeaveRequestModel(**request_data)
+        meta = getattr(ctx.request_context, 'meta', {}) or {}
+
+        user_id = getattr(meta, "userId", None) if meta else None
+        user_name = getattr(meta, "userName", None) if meta else None
+        dept_name = getattr(meta, "userDept", None) if meta else None
+
+        if not user_id or not user_name:
+            raise ValueError("userId 또는 userName이 meta 정보에 없습니다.")
+
+    except Exception as e:
+        logger.error(f"휴가 데이터 파싱 에러: {str(e)}")
+        return json.dumps({
+            "status": "error",
+            "message": "필수 파라미터 누락 또는 데이터 형식이 틀렸습니다.",
+            "details": str(e)
+        }, ensure_ascii=False)
+
+    logger.info(f"휴가 신청 시작 - 대상: {user_name}, 총 {len(data.leave_data_list)}건, 액션: {data.action_type}")
+
+    try:
+        async with ApprovalCrawler(cookies, user_id) as crawler:
+
+            result = await crawler.process_leave_request(
+                dept_name=dept_name,
+                leave_data_list=data.leave_data_list  # 리스트 형태의 데이터
+            )
+
+            if result.get("status") == "success":
+                action_name = "결재상신" if data.action_type == "F" else "임시저장"
+
+                async def handle_dialog(dialog):
+                    try:
+                        logger.info(f"브라우저 대화상자 감지 ({dialog.message}) -> 승인")
+                        await dialog.accept()
+                    except:
+                        pass
+
+                crawler.page.on("dialog", lambda d: asyncio.create_task(handle_dialog(d)))
+
+                logger.info(f"최종 {action_name} 호출: SendFlowData('{data.action_type}')")
+                await crawler.page.evaluate(f"SendFlowData('{data.action_type}')")
+
+                try:
+                    if data.action_type == "F":
+                        await crawler.page.wait_for_function("""
+                                () => {
+                                    const url = window.location.href;
+                                    return url.includes('/Flow/Doc_List') && 
+                                           url.includes('Sign=F') && 
+                                           url.includes('isTemp=N');
+                                }
+                            """, timeout=15000)
+                    else:
+                        await crawler.page.wait_for_url("**/Flow/DocBox_List?Gubun=T*", timeout=15000)
+                except Exception as e:
+                    logger.warning(f"페이지 전환 대기 중 타임아웃: {e}")
+
+                final_url = crawler.page.url
+                is_success = False
+                if data.action_type == "F" and "Doc_List" in final_url and "Sign=F" in final_url:
+                    is_success = True
+                elif data.action_type != "F" and "DocBox_List" in final_url and "Gubun=T" in final_url:
+                    is_success = True
+
+                if is_success:
+                    logger.success(f"{action_name} 성공 확인. URL: {final_url}")
+                    result["message"] = f"{user_name}님의 휴가 신청({len(data.leave_data_list)}건) {action_name} 완료"
+                elif "Doc_Write" in final_url:
+                    logger.error(f"{action_name} 후에도 작성 페이지에 머물러 있음.")
+                    result.update({"status": "fail", "message": "상신 후 페이지가 이동하지 않았습니다."})
+
+            return json.dumps(result, ensure_ascii=False)
+
+    except Exception as e:
+        logger.exception("휴가 신청 도구 실행 중 오류")
         return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
