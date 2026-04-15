@@ -420,8 +420,8 @@ class ApprovalCrawler(BaseCrawler):
         """라인 추가를 반복하며 월단위 데이터를 입력하고 자동완성을 처리하는 로직"""
         logger.info("--------------fill_monthly_overtime_form 시작----------------")
 
-        # await self.page.wait_for_selector("#AspFile", timeout=10000)
-        # frame = self.page.frame_locator("#AspFile")
+        await self.page.wait_for_selector("#AspFile", timeout=10000)
+        frame = self.page.frame_locator("#AspFile")
 
         for index, data in enumerate(ot_data_list):
             logger.info(f"[{index + 1}/{len(ot_data_list)}] {data.get('date')} 데이터 세팅 중...")
@@ -429,7 +429,7 @@ class ApprovalCrawler(BaseCrawler):
             # [1] 라인 추가 (첫 번째 데이터는 기본 줄이 있다고 가정, 2번째부터 라인추가 클릭)
             if index > 0:
                 # '라인추가' 버튼 클릭
-                add_btn = self.page.locator('input[value="라인추가"]').last
+                add_btn = frame.locator('input[value="라인추가"]').last
                 await add_btn.click()
 
                 # 애니메이션/렌더링 딜레이 방지를 위해 잠시 대기
@@ -439,7 +439,7 @@ class ApprovalCrawler(BaseCrawler):
             # 폼 구조에 따라 특정 클래스가 없다면 가장 마지막에 추가된 입력 영역 테이블 행을 찾습니다.
             # (예: 라인 추가 버튼이 있는 tr의 바로 위 tr 등, 이 부분은 실제 html에 맞게 튜닝될 수 있습니다)
             # 여기서는 편의상 input[name="emp_name"]을 포함하는 tr들을 리스트업해서 index로 접근합니다.
-            current_row = self.page.locator('tr:has(input[name="emp_name"])').nth(index)
+            current_row = frame.locator('tr:has(input[name="emp_name"])').nth(index)
 
             # [3] 이름 입력 및 jQuery UI Autocomplete 처리
             name_input = current_row.locator('input[name="emp_name"]')
@@ -449,7 +449,7 @@ class ApprovalCrawler(BaseCrawler):
 
             # 자동완성 ul 태그 출현 대기 (form 밖 <body> 끝에 주로 붙음)
             # frame 내부에 렌더링되므로 frame.locator 사용
-            autocomplete_ul = self.page.locator('ul.ui-autocomplete')
+            autocomplete_ul = frame.locator('ul.ui-autocomplete')
             await autocomplete_ul.wait_for(state="visible", timeout=5000)
 
             # 드롭박스 내에서 내 이름이 포함된 div(wrapper) 찾아서 클릭
@@ -485,7 +485,7 @@ class ApprovalCrawler(BaseCrawler):
             # await current_row.locator('select[name="otWorkGubun"]').select_option("10")
 
         # [5] 전체 공통 메모 입력 (루프 종료 후 마지막에 한 번)
-        await self.page.locator('textarea[name="memo"]').fill(memo)
+        await frame.locator('textarea[name="memo"]').fill(memo)
         logger.success(f"월 단위 OT {len(ot_data_list)}건 입력 완벽하게 완료되었습니다.")
 
     async def fill_leave_form(self, leave_data_list: list):
@@ -495,24 +495,24 @@ class ApprovalCrawler(BaseCrawler):
         """
         logger.info("--------------fill_leave_form 시작----------------")
 
-        # await self.page.wait_for_selector("#AspFile", timeout=10000)
-        # frame = self.page.frame_locator("#AspFile")
+        await self.page.wait_for_selector("#AspFile", timeout=10000)
+        frame = self.page.frame_locator("#AspFile")
 
         for index, item in enumerate(leave_data_list):
             logger.info(f"[{index + 1}/{len(leave_data_list)}] {item.start_date} ({item.leave_type}) 세팅 중...")
 
             # [1] 라인 추가 (2번째 휴가부터 '추가사용' 버튼 클릭)
             if index > 0:
-                add_btn = self.page.locator('button:has-text("추가사용"), input[value="추가사용"]').last
+                add_btn = frame.locator('button:has-text("추가사용"), input[value="추가사용"]').last
                 await add_btn.click()
                 await self.page.wait_for_timeout(500)
 
             # [2] 현재 작업할 행(Row) 특정
             # 화면에 "실제로 보이는" select 박스와 textarea만 순서대로 가져옵니다.
-            current_select = self.page.locator('select[name="holidayCode"]').nth(index)
+            current_select = frame.locator('select[name="holidayCode"]').nth(index)
             current_row = current_select.locator('xpath=./ancestor::tr')
-            memo_area = self.page.locator('textarea[name="memo"]').nth(index)
-            logger.info(f"{current_select} ({current_row})({memo_area}) 세팅 중...")
+            memo_area = frame.locator('textarea[name="memo"]').nth(index)
+            logger.info(f"[{index}] 행(Row) 확보 완료")
 
             # 🚨 [3] 휴가 종류 세팅 (자바스크립트 다이렉트 추출 방식으로 속도/안정성 극대화)
             safe_leave_type = item.leave_type.replace(" ", "")

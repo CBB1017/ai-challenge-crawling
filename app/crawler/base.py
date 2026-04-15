@@ -33,8 +33,15 @@ class ContextPool:
             if session:
                 context = session["context"]
                 try:
-                    # 파이썬 메모리만 믿지 않고, 실제 컨텍스트가 닫혔는지 브라우저에 확인!
-                    # pages 속성을 조회하거나, 단순히 에러가 나는지 체크합니다.
+                    # 1. 브라우저 세션 자체가 바뀌었는지(재연결) 체크
+                    if context.browser != browser:
+                        raise Exception("Browser instance changed")
+
+                    # 2. 브라우저 연결 상태 확인
+                    if not browser.is_connected():
+                        raise Exception("Browser disconnected")
+
+                    # 3. 파이썬 메모리만 믿지 않고, 실제 컨텍스트가 살아있는지 브라우저에 확인
                     _ = context.pages
 
                     session["last_used"] = time.time()
