@@ -434,9 +434,9 @@ async def request_for_leave(
                                            url.includes('Sign=F') && 
                                            url.includes('isTemp=N');
                                 }
-                            """, timeout=15000)
+                            """, timeout=30000)
                     else:
-                        await crawler.page.wait_for_url("**/Flow/DocBox_List?Gubun=T*", timeout=15000)
+                        await crawler.page.wait_for_url("**/Flow/DocBox_List?Gubun=T*", timeout=30000)
                 except Exception as e:
                     logger.warning(f"페이지 전환 대기 중 타임아웃: {e}")
 

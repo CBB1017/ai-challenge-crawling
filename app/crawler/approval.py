@@ -171,12 +171,12 @@ class ApprovalCrawler(BaseCrawler):
                 logger.error("상단 결재선 프레임을 찾지 못했습니다.")
                 return False
 
-            await target_frame.wait_for_selector("table", timeout=5000)
+            await target_frame.wait_for_selector("table", timeout=10000)
 
             # 5. 결재선 row 찾기 (text-is 대신 has-text)
             row = target_frame.locator(f"tr:has(td:has-text('{search_keyword}'))").first
 
-            await row.wait_for(state="visible", timeout=5000)
+            await row.wait_for(state="visible", timeout=10000)
 
             # 6. click 시도
             try:
@@ -249,7 +249,7 @@ class ApprovalCrawler(BaseCrawler):
 
             # 서브밋을 실행함과 동시에, 서버에서 Doc_Line_View 응답이 올 때까지 기다립니다.
             # 이렇게 하면 프레임이 깨지든 말든 DOM 에러(Target closed)가 발생하지 않습니다.
-            async with self.page.expect_response(lambda r: "Doc_Line_View" in r.url, timeout=10000):
+            async with self.page.expect_response(lambda r: "Doc_Line_View" in r.url, timeout=20000):
                 await self.page.evaluate(f"""(val) => {{
                             const frm = document.d_form;
                             if (frm) {{
@@ -294,7 +294,7 @@ class ApprovalCrawler(BaseCrawler):
         normalized_m = normalize_ot_minute(str_end_m)
 
         try:
-            await self.page.wait_for_load_state("domcontentloaded", timeout=5000)
+            await self.page.wait_for_load_state("domcontentloaded", timeout=10000)
         except:
             logger.error("--------------페이지 객체가 죽었다----------------")
             # 만약 페이지 객체가 죽었다면 다시 context에서 가져오기
@@ -304,13 +304,13 @@ class ApprovalCrawler(BaseCrawler):
                     break
 
             # 1. iframe 대기 전에 메인 페이지가 살아있는지 확인
-        await self.page.wait_for_selector("#AspFile", timeout=10000)
+        await self.page.wait_for_selector("#AspFile", timeout=20000)
         frame = self.page.frame_locator("#AspFile")
 
         ot_date_input = frame.locator('input[name="otDate"]')
 
         # 요소가 나타날 때까지 대기 (FrameLocator에 wait_for_selector가 없으므로 이 방식 사용)
-        await ot_date_input.wait_for(state="visible", timeout=5000)
+        await ot_date_input.wait_for(state="visible", timeout=10000)
 
         # 2. 데이터 입력 (evaluate 사용 시 이벤트 디스패치 포함)
         await ot_date_input.evaluate(
@@ -353,7 +353,7 @@ class ApprovalCrawler(BaseCrawler):
         logger.info(f"동작({action_type})이 서버로 전송되었습니다.")
 
         try:
-            await self.page.wait_for_load_state("networkidle", timeout=5000)
+            await self.page.wait_for_load_state("networkidle", timeout=10000)
         except:
             pass
 
@@ -420,7 +420,7 @@ class ApprovalCrawler(BaseCrawler):
         """라인 추가를 반복하며 월단위 데이터를 입력하고 자동완성을 처리하는 로직"""
         logger.info("--------------fill_monthly_overtime_form 시작----------------")
 
-        await self.page.wait_for_selector("#AspFile", timeout=10000)
+        await self.page.wait_for_selector("#AspFile", timeout=20000)
         frame = self.page.frame_locator("#AspFile")
 
         for index, data in enumerate(ot_data_list):
@@ -450,7 +450,7 @@ class ApprovalCrawler(BaseCrawler):
             # 자동완성 ul 태그 출현 대기 (form 밖 <body> 끝에 주로 붙음)
             # frame 내부에 렌더링되므로 frame.locator 사용
             autocomplete_ul = frame.locator('ul.ui-autocomplete')
-            await autocomplete_ul.wait_for(state="visible", timeout=5000)
+            await autocomplete_ul.wait_for(state="visible", timeout=10000)
 
             # 드롭박스 내에서 내 이름이 포함된 div(wrapper) 찾아서 클릭
             target_item = autocomplete_ul.locator(f'div.ui-menu-item-wrapper:has-text("{my_name}")').first
@@ -495,7 +495,7 @@ class ApprovalCrawler(BaseCrawler):
         """
         logger.info("--------------fill_leave_form 시작----------------")
 
-        await self.page.wait_for_selector("#AspFile", timeout=10000)
+        await self.page.wait_for_selector("#AspFile", timeout=20000)
         frame = self.page.frame_locator("#AspFile")
 
         for index, item in enumerate(leave_data_list):

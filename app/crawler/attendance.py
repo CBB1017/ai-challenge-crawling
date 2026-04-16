@@ -210,7 +210,7 @@ class AttendanceCrawler(BaseCrawler):
 
             # 4. 최종 테이블 데이터 추출
             # 페이지 로딩 후 테이블이 나타날 때까지 확실히 대기
-            await self.page.wait_for_selector('#objTblBody', timeout=5000)
+            await self.page.wait_for_selector('#objTblBody', timeout=10000)
             table = await self.page.query_selector('#objTblBody')
 
             if not table:

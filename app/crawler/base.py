@@ -100,48 +100,82 @@ class _CDPConnectionManager:
         self._lock = asyncio.Lock()
         self.playwright = None
         self.browser = None
+        self._reconnecting = False
+
+    async def start(self):
+        """서버 시작 시 호출하여 Playwright와 CDP를 미리 연결해둡니다."""
+        async with self._lock:
+            if self.playwright is None:
+                logger.info("🎭 Playwright engine starting...")
+                self.playwright = await async_playwright().start()
+            
+            if self.browser is None or not self.browser.is_connected():
+                logger.info("🚀 Pre-connecting to CDP...")
+                await self._connect_internal()
+
+    async def _connect_internal(self):
+        """내부 연결 로직 (락 없이 호출됨)"""
+        cdp_endpoint = os.environ.get("CDP_ENDPOINT", "ws://localhost:3001")
+        token = os.environ.get("TOKEN", "")
+        if token:
+            cdp_endpoint = f"{cdp_endpoint}?token={token}"
+
+        try:
+            self.browser = await self.playwright.chromium.connect_over_cdp(
+                cdp_endpoint,
+                timeout=20000  # 20초로 단축
+            )
+            self.browser.on(
+                "disconnected",
+                lambda _: asyncio.create_task(self._handle_disconnect())
+            )
+            logger.info("✅ CDP connected")
+        except Exception as e:
+            logger.error(f"❌ CDP 연결 실패: {e}")
+            self.browser = None
+            raise
 
     async def _handle_disconnect(self):
         logger.warning("⚠️ CDP disconnected")
         self.browser = None
+        # 연결이 끊어지면 즉시 백그라운드 재연결 시도
+        if not self._reconnecting:
+            asyncio.create_task(self.reconnect_background())
+
+    async def reconnect_background(self):
+        """백그라운드에서 연결을 복구합니다."""
+        if self._reconnecting:
+            return
+        
+        self._reconnecting = True
+        logger.info("♻️ Background CDP reconnection started...")
+        
+        try:
+            async with self._lock:
+                if self.browser and self.browser.is_connected():
+                    return
+                
+                for attempt in range(5):
+                    try:
+                        await self._connect_internal()
+                        break
+                    except Exception:
+                        wait_time = min(2 ** attempt, 30) # 지수 백오프
+                        await asyncio.sleep(wait_time)
+        finally:
+            self._reconnecting = False
 
     async def get_browser(self):
         async with self._lock:
-            if self.browser is None or not self.browser.is_connected():
-                logger.info("🚀 CDP reconnect")
+            if self.browser and self.browser.is_connected():
+                return self.browser
 
-                if self.playwright is None:
-                    self.playwright = await async_playwright().start()
+            logger.info("🚀 CDP on-demand connecting...")
+            if self.playwright is None:
+                self.playwright = await async_playwright().start()
 
-                cdp_endpoint = os.environ.get("CDP_ENDPOINT", "ws://localhost:3001")
-                token = os.environ.get("TOKEN", "")
-
-                if token:
-                    cdp_endpoint = f"{cdp_endpoint}?token={token}"
-
-                for attempt in range(3):
-                    try:
-                        self.browser = await self.playwright.chromium.connect_over_cdp(
-                            cdp_endpoint,
-                            timeout=100000
-                        )
-
-                        self.browser.on(
-                            "disconnected",
-                            lambda _: asyncio.create_task(self._handle_disconnect())
-                        )
-
-                        logger.info("✅ CDP connected")
-                        break
-
-                    except Exception as e:
-                        if attempt == 2:
-                            logger.error(f"❌ CDP 연결 실패: {e}")
-                            raise
-
-                        await asyncio.sleep(1)
-
-        return self.browser
+            await self._connect_internal()
+            return self.browser
 
 # 전역 싱글톤 인스턴스 생성
 cdp_manager = _CDPConnectionManager()
@@ -243,9 +277,9 @@ class BaseCrawler:
 
         try:
             logger.debug("페이지 이동 시작")
-            await self.page.goto(LOGIN_INFO["domain"], timeout=10000, wait_until="domcontentloaded")
+            await self.page.goto(LOGIN_INFO["domain"], timeout=20000, wait_until="domcontentloaded")
             logger.debug(f"프레임 대기: {frame_name}")
-            frame = await self.wait_for_frame(frame_name, timeout=5)
+            frame = await self.wait_for_frame(frame_name, timeout=10)
             if not frame:
                 logger.error("[ERROR] 프레임을 찾을 수 없습니다.")
                 return False, [], {"error": "Frame not found"}
@@ -270,7 +304,7 @@ class BaseCrawler:
             # 코루틴을 Task로 변환하여 등록
             # wait_for를 호출한 상태의 코루틴을 Task로 감싸야 합니다.
             success_task = asyncio.create_task(
-                frame.locator('img[src*="btn_logout"]').wait_for(state="visible", timeout=5000)
+                frame.locator('img[src*="btn_logout"]').wait_for(state="visible", timeout=10000)
             )
 
             try:

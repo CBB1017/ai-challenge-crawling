@@ -1,4 +1,6 @@
+import asyncio
 from threading import Thread
+from contextlib import asynccontextmanager
 
 import uvicorn
 from loguru import logger
@@ -7,14 +9,20 @@ from pydantic import BaseModel
 
 from app.core.config import LoggingMiddleware
 from app.core.server import mcp
-from app.crawler.base import BaseCrawler
+from app.crawler.base import BaseCrawler, cdp_manager
 from app.session.session_manager import save_session
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # FastAPI 시작 시 CDP 연결 초기화
+    logger.info("🚀 Pre-initializing CDP for FastAPI...")
+    asyncio.create_task(cdp_manager.start())
+    yield
 
 # 1. FastAPI 먼저 선언 (로그인용)
-app = FastAPI(title="Groupware Auth Proxy")
+app = FastAPI(title="Groupware Auth Proxy", lifespan=lifespan)
 # FastAPI 서버 설정
 config = uvicorn.Config(app, host="0.0.0.0", port=8000, log_level="info")
 server = uvicorn.Server(config)
@@ -74,7 +82,23 @@ async def status():
 
 def run_mcp():
     # MCP는 별도 스레드에서 차단(blocking) 방식으로 실행
-    mcp.run(transport="streamable-http")
+    # 실행 직전에 비동기로 CDP 초기화 시도
+    async def _start():
+        logger.info("🚀 Pre-initializing CDP for MCP...")
+        await cdp_manager.start()
+        
+        # mcp.run()은 내부에서 anyio.run()을 호출하여 새 루프를 만들려고 시도함 (에러 원인)
+        # 대신 내부의 비동기 실행 메서드를 직접 호출하여 현재 루프를 공유합니다.
+        try:
+            # FastMCP의 내부 비동기 실행 메서드 호출
+            await mcp.run_streamable_http_async()
+        except AttributeError:
+            # 혹시나 메서드명이 다를 경우를 대비한 fallback
+            logger.warning("mcp.run_streamable_http_async() not found, falling back to mcp.run()")
+            # 이 경우 루프 충돌을 피하기 위해 run()을 호출하기 전에 루프를 종료하거나 다른 방식이 필요
+            mcp.run(transport="streamable-http")
+    
+    asyncio.run(_start())
 
 if __name__ == "__main__":
     # 1. MCP 서버를 데몬 스레드로 시작
