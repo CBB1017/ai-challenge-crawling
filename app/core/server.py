@@ -312,9 +312,14 @@ async def request_overtime_approval(
             if result.get("status") == "success":
                 action_name = "결재상신" if data.action_type == "F" else "임시저장"
 
+                # 대화상자 메시지 캡처
+                dialog_messages = []
+
                 async def handle_dialog(dialog):
                     try:
-                        logger.info(f"브라우저 대화상자 감지 ({dialog.message}) -> 승인")
+                        msg = dialog.message
+                        dialog_messages.append(msg)
+                        logger.info(f"브라우저 대화상자 감지 ({msg}) -> 승인")
                         await dialog.accept()
                     except:
                         pass
@@ -332,9 +337,15 @@ async def request_overtime_approval(
                         return True
                     except Exception:
                         pass
-                    
+
                     # 2. 현재 페이지가 닫혔거나 이동이 없는 경우, 컨텍스트 내 모든 페이지 뒤지기
                     for _ in range(10): # 최대 5초 대기
+                        # 에러성 대화상자 확인
+                        error_dialogs = [m for m in dialog_messages if "저장하시겠습니까" not in m and "상신하시겠습니까" not in m]
+                        if error_dialogs:
+                            logger.warning(f"에러 대화상자 감지로 인한 대기 중단: {error_dialogs[-1]}")
+                            return False
+
                         for p in crawler.context.pages:
                             try:
                                 if not p.is_closed() and any(pat in p.url for pat in ["Doc_List", "DocBox_List"]):
@@ -358,9 +369,14 @@ async def request_overtime_approval(
                     logger.success(f"{action_name} 성공 확인. URL: {crawler.page.url}")
                     result["message"] = f"{user_name}님의 OT 신청 {action_name} 완료"
                 else:
-                    # 실패 시 현재 상태 로그 출력
-                    logger.error(f"{action_name} 후 목적지 도달 실패. 현재 URL: {crawler.page.url if not crawler.page.is_closed() else 'CLOSED'}")
-                    result.update({"status": "fail", "message": "상신 후 페이지가 이동하지 않았습니다."})
+                    # 실패 시 대화상자 메시지가 있다면 해당 메시지를 결과에 포함
+                    error_msg = dialog_messages[-1] if dialog_messages else "페이지 이동 실패"
+                    logger.error(f"{action_name} 실패. 사유: {error_msg}")
+                    result.update({
+                        "status": "fail",
+                        "message": f"{action_name} 중 오류가 발생했습니다: {error_msg}",
+                        "details": error_msg
+                    })
 
             return json.dumps(result, ensure_ascii=False)
 
@@ -428,9 +444,14 @@ async def request_for_leave(
                 if result.get("status") == "success":
                     action_name = "결재상신" if data.action_type == "F" else "임시저장"
 
+                    # 대화상자 메시지를 저장할 리스트
+                    dialog_messages = []
+
                     async def handle_dialog(dialog):
                         try:
-                            logger.info(f"브라우저 대화상자 감지 ({dialog.message}) -> 승인")
+                            msg = dialog.message
+                            dialog_messages.append(msg)
+                            logger.info(f"브라우저 대화상자 감지 ({msg}) -> 승인")
                             await dialog.accept()
                         except:
                             pass
@@ -449,6 +470,13 @@ async def request_for_leave(
                             pass
 
                         for _ in range(15):  # 최대 7.5초 대기
+                            # 만약 에러성 대화상자가 떴다면 즉시 중단하고 실패 처리하기 위해 메시지 확인
+                            # "저장하시겠습니까" 이외의 메시지가 있다면 에러일 확률이 높음
+                            error_dialogs = [m for m in dialog_messages if "저장하시겠습니까" not in m and "상신하시겠습니까" not in m]
+                            if error_dialogs:
+                                logger.warning(f"에러 대화상자 감지로 인한 대기 중단: {error_dialogs[-1]}")
+                                return False
+
                             for p in crawler.context.pages:
                                 try:
                                     if not p.is_closed() and any(pat in p.url for pat in ["Doc_List", "DocBox_List"]):
@@ -471,9 +499,14 @@ async def request_for_leave(
                         logger.success(f"{action_name} 성공 확인. URL: {crawler.page.url}")
                         result["message"] = f"{user_name}님의 휴가 신청({len(data.leave_data_list)}건) {action_name} 완료"
                     else:
-                        logger.error(f"{action_name} 후 목적지 도달 실패. 현재 URL: {crawler.page.url if not crawler.page.is_closed() else 'CLOSED'}")
-                        result.update({"status": "fail", "message": "상신 후 페이지가 이동하지 않았습니다."})
-
+                        # 실패 시 대화상자 메시지가 있다면 해당 메시지를 결과에 포함
+                        error_msg = dialog_messages[-1] if dialog_messages else "페이지 이동 실패"
+                        logger.error(f"{action_name} 실패. 사유: {error_msg}")
+                        result.update({
+                            "status": "fail", 
+                            "message": f"{action_name} 중 오류가 발생했습니다: {error_msg}",
+                            "details": error_msg
+                        })
                 return json.dumps(result, ensure_ascii=False)
 
         except Exception as e:
