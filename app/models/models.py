@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
 from typing import Optional, Literal, Any, List
 
+from loguru import logger
 from pydantic import BaseModel, Field, AliasChoices, field_validator, model_validator
 
 
@@ -134,7 +135,7 @@ class LeaveItemModel(BaseModel):
 
     start_date: Optional[Any] = Field(
         default=None,
-        validation_alias=AliasChoices('start_date', 'date'),
+        validation_alias=AliasChoices('start_date', 'date', 'leave_date'),
         description="휴가 시작일(YYYY-MM-DD)."
     )
 
@@ -169,7 +170,12 @@ class LeaveItemModel(BaseModel):
 
         now = datetime.now()
 
-        # 1. 자연어 날짜 처리
+        # 1. 날짜 필드 통합 및 자연어 처리
+        # 별칭(leave_date, date)으로 들어온 값을 start_date로 통일
+        raw_date = data.get('start_date') or data.get('leave_date') or data.get('date')
+        if raw_date:
+            data['start_date'] = raw_date
+
         for date_field in ['start_date', 'end_date']:
             val = data.get(date_field)
             if isinstance(val, str):
@@ -212,13 +218,15 @@ class LeaveItemModel(BaseModel):
         return data
 
 
+from app.core.scheduler import is_weekend, is_holiday
+
 # 전체 상신을 감싸는 루트 모델
 class LeaveRequestModel(BaseModel):
     action_type: Literal["T", "F"] = Field(default="T")
 
     # 여러 개의 휴가를 리스트로 받음
     leave_data_list: List[LeaveItemModel] = Field(
-        description="신청할 휴가 목록. '월요일 연차랑 화요일 오전 반차 올려줘'처럼 여러 개를 요청하면 리스트에 2개의 객체를 만드세요."
+        description="신청할 휴가 목록. '월요일부터 금요일까지 연차'처럼 범위를 요청하면 서버에서 자동으로 주말/공휴일을 제외하고 확장합니다."
     )
 
     @field_validator('action_type', mode='before')
@@ -227,3 +235,39 @@ class LeaveRequestModel(BaseModel):
         if isinstance(v, bool):
             return "T" if v else "F"
         return v
+
+    @model_validator(mode='after')
+    def expand_date_ranges(self) -> 'LeaveRequestModel':
+        """
+        1. 각 LeaveItemModel의 start_date와 end_date가 다를 경우(범위) 영업일로 확장합니다.
+        2. 리스트 내의 모든 항목에 대해 주말과 공휴일을 최종 필터링합니다.
+        """
+        expanded_list = []
+        for item in self.leave_data_list:
+            try:
+                start_dt = datetime.strptime(item.start_date, "%Y-%m-%d")
+                end_dt = datetime.strptime(item.end_date, "%Y-%m-%d")
+
+                # 범위(Range) 처리
+                if start_dt != end_dt:
+                    curr_dt = start_dt
+                    while curr_dt <= end_dt:
+                        if not is_weekend(curr_dt) and not is_holiday(curr_dt):
+                            new_item = item.model_copy()
+                            new_item.start_date = curr_dt.strftime("%Y-%m-%d")
+                            new_item.end_date = new_item.start_date
+                            expanded_list.append(new_item)
+                        curr_dt += timedelta(days=1)
+                else:
+                    # 단일 날짜 처리 (여기서도 주말/공휴일 체크)
+                    if not is_weekend(start_dt) and not is_holiday(start_dt):
+                        expanded_list.append(item)
+                    else:
+                        logger.info(f"🚫 주말/공휴일 신청 건 제외됨: {item.start_date}")
+
+            except Exception as e:
+                logger.error(f"날짜 처리 중 에러: {e}")
+                expanded_list.append(item)
+
+        self.leave_data_list = expanded_list
+        return self

@@ -167,10 +167,23 @@ class _CDPConnectionManager:
 
     async def get_browser(self):
         async with self._lock:
-            if self.browser and self.browser.is_connected():
-                return self.browser
+            # 1. 기존 브라우저가 있고 연결된 것처럼 보인다면 Health Check
+            if self.browser:
+                try:
+                    if self.browser.is_connected():
+                        # 실제 통신이 가능한지 확인 (timeout을 짧게 주어 체크)
+                        await asyncio.wait_for(self.browser.version(), timeout=2.0)
+                        return self.browser
+                except Exception as e:
+                    logger.warning(f"⚠️ 브라우저 Health Check 실패 (재연결 필요): {e}")
+                    try:
+                        await self.browser.close()
+                    except:
+                        pass
+                    self.browser = None
 
-            logger.info("🚀 CDP on-demand connecting...")
+            # 2. 연결이 없거나 실패한 경우 새로 연결
+            logger.info("🚀 CDP connecting (on-demand or recovery)...")
             if self.playwright is None:
                 self.playwright = await async_playwright().start()
 
@@ -201,34 +214,49 @@ class BaseCrawler:
         self.user_lock = None
     async def __aenter__(self):
         await crawler_semaphore.acquire()
-        try:
-            logger.debug(f"🚦 세마포어 획득")
-            await ContextPool.cleanup()
+        max_retries = 2
+        for attempt in range(max_retries):
+            try:
+                logger.debug(f"🚦 세마포어 획득 (시도 {attempt + 1}/{max_retries})")
+                await ContextPool.cleanup()
 
-            logger.debug(f"1. 유저 락 획득 시도: {self.user_key}")
-            self.user_lock = await UserLockPool.get_lock(self.user_key)
-            await self.user_lock.acquire()
+                logger.debug(f"1. 유저 락 획득 시도: {self.user_key}")
+                self.user_lock = await UserLockPool.get_lock(self.user_key)
+                await self.user_lock.acquire()
 
-            logger.debug("2. 브라우저 연결 시도")
-            self.browser = await cdp_manager.get_browser()
+                logger.debug("2. 브라우저 연결 시도")
+                self.browser = await cdp_manager.get_browser()
 
-            logger.debug("3. 컨텍스트 생성/조회 시도")
-            self.context = await ContextPool.get_or_create(
-                self.user_key,
-                self.browser,
-                self.cookies
-            )
+                logger.debug("3. 컨텍스트 생성/조회 시도")
+                self.context = await ContextPool.get_or_create(
+                    self.user_key,
+                    self.browser,
+                    self.cookies
+                )
 
-            logger.debug("4. 새 페이지 생성 시도")
-            self.page = await self.context.new_page()
+                logger.debug("4. 새 페이지 생성 시도")
+                self.page = await self.context.new_page()
 
-            logger.debug("5. 모든 준비 완료")
-            return self
+                logger.debug("5. 모든 준비 완료")
+                return self
 
-        except Exception as e:
-            # 진입 단계에서 실패 시 자원 반납
-            await self.__aexit__(type(e), e, None)
-            raise
+            except Exception as e:
+                logger.warning(f"⚠️ Crawler 진입 실패 (시도 {attempt + 1}): {e}")
+                
+                # 락 해제
+                if self.user_lock and self.user_lock.locked():
+                    self.user_lock.release()
+                
+                # 닫힌 페이지/브라우저 관련 에러라면 풀에서 제거하여 다음 시도 때 새로 만들게 함
+                if "closed" in str(e).lower() or "disconnected" in str(e).lower():
+                    await ContextPool.remove(self.user_key)
+                
+                if attempt == max_retries - 1:
+                    # 마지막 시도 실패 시 자원 반납 후 에러 발생
+                    crawler_semaphore.release()
+                    raise
+                
+                await asyncio.sleep(1) # 잠시 대기 후 재시도
             #1. 원격 CDP가 아닌 로컬 브라우저를 강제로 띄웁니다.
             # self.browser = await self.playwright.chromium.launch(
             #     headless=False,  # 브라우저 숨김 해제

@@ -1,43 +1,90 @@
 services:
-  browserless:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: groupware-postgres
+    restart: always
+    environment:
+      POSTGRES_DB: groupware
+      POSTGRES_USER: appuser
+      POSTGRES_PASSWORD: apppass
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - backend
+  redis:
+    image: redis:7-alpine
+    container_name: groupware-redis
+    restart: always
+    command: redis-server --requirepass redispass
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - backend
+  chrome:
     image: browserless/chrome:latest
+    container_name: groupware-chrome
+    restart: always
+    shm_size: '2gb'  # Chrome의 메모리 부족으로 인한 Crash 방지 (매우 중요)
     environment:
       - TOKEN=01QWI6OUT42U8
       - TZ=Asia/Seoul
+      - MAX_CONCURRENT_SESSIONS=10
+      - CONNECTION_TIMEOUT=300000  # 타임아웃 5분으로 연장
+      - PREBOOT_CHROME=true        # 브라우저 미리 띄우기
+      - KEEP_ALIVE=true            # 연결 유지 활성화
     ports:
       - "3001:3000"
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 4G
     logging:
       driver: json-file
       options:
         max-size: "20m"   # 로그 파일 1개당 최대 20MB
         max-file: "5"     # 최대 5개 파일까지만 보관
     networks:
-      - attendance
-  crawling:
-    image: crawling:latest
-    container_name: attendance_python
-    environment:
-      - PYTHONUNBUFFERED=1
-      - CDP_ENDPOINT=ws://browserless:3000
-      - PORT=8080
-      - LOG_LEVEL=DEBUG
-      - GROUPWARE_DOMAIN=https://ekp.brycenkorea.co.kr:1212
-      - LOGIN_ID=bc.mun
-      - LOGIN_PW=attendanceT2@
-      - BACKEND_DOMAIN=http://localhost:8080
-      - TOKEN=01QWI6OUT42U8
-      - TZ=Asia/Seoul
-    ports:
-      - "8081:8080"
-    depends_on:
-      - browserless
-    logging:
-      driver: json-file
-      options:
-        max-size: "20m"
-        max-file: "5"
-    networks:
-      - attendance
+      - backend
+        #  playwright-mcp:
+        #    image: mcp/playwright:latest
+        #    container_name: playwright-mcp
+        #    command: >
+        #      --transport http
+        #      --port 3000
+        #    ports:
+        #      - "3000:3000"
+        #    restart: unless-stopped
+      #    networks:
+      #      - backend
+      #    # ?대?留?李⑤떒???먰븯硫??꾨옒泥섎읆 ?ㅽ듃?뚰겕 ?뺤콉 異붽? 怨좊젮
+    # cap_drop:
+    #   - ALL
+
+#   spring-app:
+#     build: .
+#     container_name: spring-app
+#     restart: always
+#     depends_on:
+#       - mysql
+#       - playwright-mcp
+#     ports:
+#       - "8080:8080"
+#     environment:
+#       SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/groupware
+#       SPRING_DATASOURCE_USERNAME: appuser
+#       SPRING_DATASOURCE_PASSWORD: apppass
+#       MCP_BASE_URL: http://playwright-mcp:3001
+#     networks:
+#       - backend
+#
+volumes:
+  postgres-data:
+  redis-data:
 networks:
-  attendance:
-    external: true
+  backend:
+    driver: bridge

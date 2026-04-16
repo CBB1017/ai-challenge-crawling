@@ -503,13 +503,23 @@ class ApprovalCrawler(BaseCrawler):
 
             # [1] 라인 추가 (2번째 휴가부터 '추가사용' 버튼 클릭)
             if index > 0:
+                # '추가사용' 버튼이 여러 개일 수 있으므로 마지막 버튼 특정
                 add_btn = frame.locator('button:has-text("추가사용"), input[value="추가사용"]').last
-                await add_btn.click()
+                
+                # 🚨 Playwright의 click()은 안정성 체크 중 창이 닫힐 수 있으므로 JS 다이렉트 클릭 사용
+                try:
+                    await add_btn.evaluate("el => el.click()")
+                except Exception as e:
+                    logger.warning(f"JS 클릭 실패, 일반 클릭 시도: {e}")
+                    await add_btn.click(force=True)
+
+                # 새 행이 렌더링될 때까지 확실히 대기
+                await frame.locator('select[name="holidayCode"]').nth(index).wait_for(state="attached", timeout=5000)
                 await self.page.wait_for_timeout(500)
 
             # [2] 현재 작업할 행(Row) 특정
-            # 화면에 "실제로 보이는" select 박스와 textarea만 순서대로 가져옵니다.
             current_select = frame.locator('select[name="holidayCode"]').nth(index)
+            await current_select.scroll_into_view_if_needed()
             current_row = current_select.locator('xpath=./ancestor::tr')
             memo_area = frame.locator('textarea[name="memo"]').nth(index)
             logger.info(f"[{index}] 행(Row) 확보 완료")
@@ -551,18 +561,30 @@ class ApprovalCrawler(BaseCrawler):
             if safe_leave_type in ["반차", "보상휴가(반일)"]:
                 half_type = item.half_day_type if item.half_day_type else "오후"
                 tz_select = current_row.locator('select[name="SelTimeZone"]')
+                
+                # 콤보박스가 렌더링될 때까지 최대 3초 대기
+                try:
+                    await tz_select.wait_for(state="visible", timeout=3000)
+                except:
+                    logger.warning(f"오전/오후 콤보박스가 나타나지 않아 1초 추가 대기 시도...")
+                    await self.page.wait_for_timeout(1000)
 
-                tz_val = await tz_select.evaluate(f'''(select) => {{
-                        const target = Array.from(select.options).find(opt => opt.text.includes("{half_type}"));
-                        return target ? target.value : null;
-                    }}''')
-
-                if tz_val:
-                    await tz_select.select_option(value=tz_val)
+                try:
+                    # label(텍스트)로 직접 선택 시도 (가장 안정적)
+                    await tz_select.select_option(label=half_type)
                     logger.debug(f"반차 유형 세팅 완료: {half_type}")
-                else:
-                    logger.warning(f"오전/오후 콤보박스 값을 찾을 수 없습니다: {half_type}")
-                    return {"status": "fail", "message": "오전/오후 콤보박스 값을 찾을 수 없습니다"}
+                except Exception as e:
+                    logger.warning(f"label 선택 실패, value 추출 시도: {e}")
+                    # 실패 시 기존 evaluate 방식 (최후의 수단)
+                    tz_val = await tz_select.evaluate(f'''(select) => {{
+                            const target = Array.from(select.options).find(opt => opt.text.includes("{half_type}"));
+                            return target ? target.value : null;
+                        }}''')
+                    if tz_val:
+                        await tz_select.select_option(value=tz_val)
+                    else:
+                        logger.error(f"오전/오후 콤보박스 값을 찾을 수 없습니다: {half_type}")
+                        return {"status": "fail", "message": "오전/오후 콤보박스 값을 찾을 수 없습니다"}
 
             elif safe_leave_type == "반반차":
                 s_h, s_m = item.start_time.split(":")
