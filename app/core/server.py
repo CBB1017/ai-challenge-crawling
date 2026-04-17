@@ -8,12 +8,10 @@ from dotenv import load_dotenv
 from loguru import logger
 from mcp.server.fastmcp import FastMCP, Context
 
-from app.core.config import LOGIN_INFO
 from app.core.utils import clean_user_name
 from app.crawler.approval import ApprovalCrawler
 from app.crawler.attendance import AttendanceCrawler
 from app.crawler.meeting import MeetingRoomCrawler
-from app.crawler.member import MemberCrawler
 from app.crawler.overtime import OvertimeCalculator, get_list_for_submission, get_summary_for_report
 from app.models.models import OvertimeRequestModel, LeaveRequestModel
 from app.session.session_manage_decorator import requires_cookies
@@ -86,18 +84,18 @@ async def get_meeting_room_status(
         return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
-@requires_cookies
-async def get_team_members(
-        ctx: Context = None,
-        cookies: list = None
-) -> str:
-    """조직도(팀 및 멤버정보)와 이메일 정보를 병합하여 JSON으로 반환합니다.
-     (이 함수는 별도의 파라미터 입력이 필요하지 않으며, 시스템 설정값을 사용합니다.)
-    """
-    async with MemberCrawler(cookies) as crawler:
-        result = await crawler.fetch_members(LOGIN_INFO["domain"])
-        return json.dumps(result, ensure_ascii=False)
+# @mcp.tool()
+# @requires_cookies
+# async def get_team_members(
+#         ctx: Context = None,
+#         cookies: list = None
+# ) -> str:
+#     """조직도(팀 및 멤버정보)와 이메일 정보를 병합하여 JSON으로 반환합니다.
+#      (이 함수는 별도의 파라미터 입력이 필요하지 않으며, 시스템 설정값을 사용합니다.)
+#     """
+#     async with MemberCrawler(cookies) as crawler:
+#         result = await crawler.fetch_members(LOGIN_INFO["domain"])
+#         return json.dumps(result, ensure_ascii=False)
 
 
 # @mcp.tool()
@@ -443,6 +441,21 @@ async def request_for_leave(
         }, ensure_ascii=False)
 
     logger.info(f"휴가 신청 시작 - 대상: {user_name}, 총 {len(data.leave_data_list)}건, 리스트: {data.leave_data_list}")
+
+    if not data.leave_data_list:
+        if data.skipped_dates:
+            skipped_str = ", ".join(data.skipped_dates)
+            logger.warning(f"[{user_name}] 주말/공휴일 제외로 신청 내역 없음: {skipped_str}")
+            return json.dumps({
+                "status": "fail",
+                "message": f"요청하신 날짜({skipped_str})는 주말 또는 공휴일이어서 휴가를 신청할 수 없습니다. 평일로 다시 요청해주세요.",
+            }, ensure_ascii=False)
+
+        logger.warning(f"[{user_name}] 휴가 신청 내역이 없음 (leave_data_list is empty)")
+        return json.dumps({
+            "status": "fail",
+            "message": "신청할 휴가 내역을 찾을 수 없습니다. '몇 월 며칠에 어떤 휴가(연차, 오후반차 등)'를 쓰실지 정확하게 말씀해주세요.",
+        }, ensure_ascii=False)
 
     max_retries = 2
     for attempt in range(max_retries):

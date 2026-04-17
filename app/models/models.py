@@ -229,6 +229,9 @@ class LeaveRequestModel(BaseModel):
         description="신청할 휴가 목록. '월요일부터 금요일까지 연차'처럼 범위를 요청하면 서버에서 자동으로 주말/공휴일을 제외하고 확장합니다."
     )
 
+    # 🚀 제외된 날짜를 추적하기 위한 필드 (응답용)
+    skipped_dates: List[str] = Field(default_factory=list)
+
     @field_validator('action_type', mode='before')
     @classmethod
     def transform_action_type(cls, v):
@@ -243,6 +246,7 @@ class LeaveRequestModel(BaseModel):
         2. 리스트 내의 모든 항목에 대해 주말과 공휴일을 최종 필터링합니다.
         """
         expanded_list = []
+        skipped = []
         for item in self.leave_data_list:
             try:
                 start_dt = datetime.strptime(item.start_date, "%Y-%m-%d")
@@ -257,12 +261,15 @@ class LeaveRequestModel(BaseModel):
                             new_item.start_date = curr_dt.strftime("%Y-%m-%d")
                             new_item.end_date = new_item.start_date
                             expanded_list.append(new_item)
+                        else:
+                            skipped.append(curr_dt.strftime("%Y-%m-%d"))
                         curr_dt += timedelta(days=1)
                 else:
                     # 단일 날짜 처리 (여기서도 주말/공휴일 체크)
                     if not is_weekend(start_dt) and not is_holiday(start_dt):
                         expanded_list.append(item)
                     else:
+                        skipped.append(start_dt.strftime("%Y-%m-%d"))
                         logger.info(f"🚫 주말/공휴일 신청 건 제외됨: {item.start_date}")
 
             except Exception as e:
@@ -270,4 +277,5 @@ class LeaveRequestModel(BaseModel):
                 expanded_list.append(item)
 
         self.leave_data_list = expanded_list
+        self.skipped_dates = list(set(skipped)) # 중복 제거
         return self
