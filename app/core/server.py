@@ -1,7 +1,7 @@
 import asyncio
 import contextvars
 import json
-from datetime import datetime, date
+from datetime import date
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -28,7 +28,6 @@ mcp = FastMCP("crawler-server")
 @mcp.tool()
 @requires_cookies
 async def get_team_attendance(
-        dept_name: str,
         ot_date: Optional[str] = None,
         ctx: Context = None,
         cookies: list = None
@@ -40,8 +39,22 @@ async def get_team_attendance(
     """
     logger.info("팀 근태 기록 조회 시작")
     # 1. Meta에서 안전하게 user_id 추출
-    meta = getattr(ctx.request_context, 'meta', None)
-    user_id = getattr(meta, "userId", None) if meta else "anonymous"
+    try:
+        meta = getattr(ctx.request_context, 'meta', {}) or {}
+
+        user_id = getattr(meta, "userId", None) if meta else None
+        user_name = getattr(meta, "userName", None) if meta else None
+        dept_name = getattr(meta, "userDept", None) if meta else None
+        if not user_id or not user_name:
+            raise ValueError("userId 또는 userName이 meta 정보에 없습니다.")
+    except Exception as e:
+        logger.error(f"데이터 파싱 에러(LLM 파라미터 누락): {str(e)}")
+        # LLM에게 어떤 필드가 누락되었는지 피드백을 주어 스스로 수정하게 유도
+        return json.dumps({
+            "status": "error",
+            "message": "필수 파라미터가 누락되었거나 형식이 틀렸습니다. 시스템 컨텍스트에서 로그인 유저의 부서(userDept)와 이름(user_id)을 확인하여 다시 호출해주세요.",
+            "details": str(e)
+        }, ensure_ascii=False)
     logger.debug(f"get_team_attendance 호출됨 - 날짜: {ot_date}, 부서: {dept_name}")
 
     async with AttendanceCrawler(cookies, user_id) as crawler:
@@ -87,21 +100,21 @@ async def get_team_members(
         return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
-@requires_cookies
-async def calculate_overtime_data(
-        attendance_data: list[dict],
-        ctx: Context = None,
-        cookies: list = None
-) -> str:
-    """
-    크롤링된 근태 데이터를 기반으로 초과 근무(OT) 및 부족 근무 상쇄 결과를 계산합니다.
-    """
-    logger.info(f"OT 계산 시작 (데이터 개수: {len(attendance_data)})")
-    calculator = OvertimeCalculator()
-    result_dict = calculator.calculate_overtime(attendance_data)
-    logger.success("OT 계산 완료")
-    return json.dumps(result_dict, ensure_ascii=False)
+# @mcp.tool()
+# @requires_cookies
+# async def calculate_overtime_data(
+#         attendance_data: list[dict],
+#         ctx: Context = None,
+#         cookies: list = None
+# ) -> str:
+#     """
+#     크롤링된 근태 데이터를 기반으로 초과 근무(OT) 및 부족 근무 상쇄 결과를 계산합니다.
+#     """
+#     logger.info(f"OT 계산 시작 (데이터 개수: {len(attendance_data)})")
+#     calculator = OvertimeCalculator()
+#     result_dict = calculator.calculate_overtime(attendance_data)
+#     logger.success("OT 계산 완료")
+#     return json.dumps(result_dict, ensure_ascii=False)
 
 
 # @mcp.tool()

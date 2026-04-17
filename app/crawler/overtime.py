@@ -209,27 +209,39 @@ class OvertimeCalculator:
                 logger.debug(
                     f"[{day}일] 🏢 평일 근무 기준: 계획퇴근={self.minutes_to_time(plan_end_min)}, OT인정시작={self.minutes_to_time(ot_start_baseline)} (저녁휴게 60분 포함)")
 
+                # 1. 실제 근무 시간 기반의 휴게 시간 및 순 근무 시간 계산
+                # 30분 단위로 8시간 근무를 했는지 판단하기 위해 calculate_work_and_breaks 사용
+                duration_net_work, lunch_break, duration_dinner_break = self.calculate_work_and_breaks(
+                    adjusted_start_min, adjusted_end_min
+                )
+
                 if adjusted_end_min > ot_start_baseline:
                     ot_minutes = adjusted_end_min - ot_start_baseline
+                    # OT 발생 시 저녁 휴게 1시간 강제 공제 (기존 로직 유지)
                     dinner_break = 60
                     logger.info(
                         f"[{day}일] ✅ OT 발생! 퇴근({self.minutes_to_time(adjusted_end_min)}) - OT시작({self.minutes_to_time(ot_start_baseline)}) = {ot_minutes}분")
                 else:
+                    ot_minutes = 0
+                    dinner_break = duration_dinner_break
                     logger.debug(
                         f"[{day}일] ❌ OT 미발생 (실제퇴근 {self.minutes_to_time(adjusted_end_min)} <= OT인정시작 {self.minutes_to_time(ot_start_baseline)})")
 
-                # 부족 근무 계산 시 휴가/반차 사용자는 페널티 면제
-                if adjusted_end_min < plan_end_min:
+                # 최종 순 근무 시간 재계산 (OT 공제 반영)
+                net_work_minutes = max(0, (adjusted_end_min - adjusted_start_min) - lunch_break - dinner_break)
+
+                # 3. 부족 근무(Minus OT) 판단
+                # 사용자의 요청: 계획 근무 시간이 아니더라도 30분 단위로 8시간 근무를 했다면 부족 근무 아님.
+                # 이를 위해 OT 공제 전의 duration_net_work를 기준으로 판단함.
+                if duration_net_work < self.standard_work_minutes:
                     if is_vacation_day:
                         logger.info(
-                            f"[{day}일] 🌴 휴가/반차 사용일: 일찍 퇴근했지만 부족 근무(Minus OT) 페널티를 면제합니다. (구분: {result_type})")
+                            f"[{day}일] 🌴 휴가/반차 사용일: 부족 근무(Minus OT) 페널티를 면제합니다. (구분: {result_type})")
                     else:
-                        overtime_diff = adjusted_end_min - plan_end_min
+                        overtime_diff = duration_net_work - self.standard_work_minutes
                         minus_ot = -math.ceil(-overtime_diff / 30) * 30
                         logger.info(
-                            f"[{day}일] ⚠️ 부족 근무 발생: 계획({self.minutes_to_time(plan_end_min)}) - 실제({self.minutes_to_time(adjusted_end_min)}) -> 페널티 {minus_ot}분")
-                lunch_break = 60 if (adjusted_end_min - adjusted_start_min) > 240 else 0
-                net_work_minutes = max(0, (adjusted_end_min - adjusted_start_min) - lunch_break - dinner_break)
+                            f"[{day}일] ⚠️ 부족 근무 발생: 기준({self.minutes_to_time(self.standard_work_minutes)}) > 실제({self.minutes_to_time(duration_net_work)}) -> 페널티 {minus_ot}분")
 
             ot_entries.append({
                 'day': day,
