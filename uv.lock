@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.13"
 
 [[package]]
@@ -196,6 +196,15 @@ wheels = [
 ]
 
 [[package]]
+name = "contextvars"
+version = "2.4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "immutables" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/83/96/55b82d9f13763be9d672622e1b8106c85acb83edd7cc2fa5bc67cd9877e9/contextvars-2.4.tar.gz", hash = "sha256:f38c908aaa59c14335eeea12abea5f443646216c4e29380d7bf34d2018e2c39e", size = 9570, upload-time = "2019-04-01T14:42:11.953Z" }
+
+[[package]]
 name = "cryptography"
 version = "46.0.6"
 source = { registry = "https://pypi.org/simple" }
@@ -297,6 +306,7 @@ dependencies = [
     { name = "beautifulsoup4" },
     { name = "bs4" },
     { name = "certifi" },
+    { name = "contextvars" },
     { name = "fastapi" },
     { name = "h11" },
     { name = "holidays" },
@@ -330,6 +340,7 @@ requires-dist = [
     { name = "beautifulsoup4", specifier = "==4.13.4" },
     { name = "bs4", specifier = "~=0.0.2" },
     { name = "certifi", specifier = "==2025.7.14" },
+    { name = "contextvars", specifier = ">=2.4" },
     { name = "fastapi", specifier = "==0.116.1" },
     { name = "h11", specifier = "==0.16.0" },
     { name = "holidays", specifier = "~=0.77" },
@@ -418,6 +429,22 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/f1/70/7703c29685631f5a7590aa73f1f1d3fa9a380e654b86af429e0934a32f7d/idna-3.10.tar.gz", hash = "sha256:12f65c9b470abda6dc35cf8e63cc574b1c52b11df2c86030af0ac09b01b13ea9", size = 190490, upload-time = "2024-09-15T18:07:39.745Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/76/c6/c88e154df9c4e1a2a66ccf0005a88dfb2650c1dffb6f5ce603dfbd452ce3/idna-3.10-py3-none-any.whl", hash = "sha256:946d195a0d259cbba61165e88e65941f16e9b36ea6ddb97f00452bae8b1287d3", size = 70442, upload-time = "2024-09-15T18:07:37.964Z" },
+]
+
+[[package]]
+name = "immutables"
+version = "0.21"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/69/41/0ccaa6ef9943c0609ec5aa663a3b3e681c1712c1007147b84590cec706a0/immutables-0.21.tar.gz", hash = "sha256:b55ffaf0449790242feb4c56ab799ea7af92801a0a43f9e2f4f8af2ab24dfc4a", size = 89008, upload-time = "2024-10-10T00:55:01.434Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/5e/db/60da6f5a3c3f64e0b3940c4ad86e1971d9d2eb8b13a179c26eda5ec6a298/immutables-0.21-cp313-cp313-macosx_10_13_x86_64.whl", hash = "sha256:79674b51aa8dd983f9ac55f7f67b433b1df84a6b4f28ab860588389a5659485b", size = 31922, upload-time = "2024-10-10T00:54:29.305Z" },
+    { url = "https://files.pythonhosted.org/packages/9b/89/5420f1d16a652024fcccc9c07d46d4157fcaf33ff37c82412c83fc16ef36/immutables-0.21-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:93c8350f8f7d0d9693f708229d9d0578e6f3b785ce6da4bced1da97137aacfad", size = 31552, upload-time = "2024-10-10T00:54:30.282Z" },
+    { url = "https://files.pythonhosted.org/packages/d2/d0/a5fb7c164ddb298ec37537e618b70dfa30c7cae9fac01de374c36489cbc9/immutables-0.21-cp313-cp313-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:583d2a63e444ce1538cc2bda56ae1f4a1a11473dbc0377c82b516bc7eec3b81e", size = 104334, upload-time = "2024-10-10T00:54:31.284Z" },
+    { url = "https://files.pythonhosted.org/packages/f3/a5/5fda0ee4a261a85124011ac0750fec678f00e1b2d4a5502b149a3b4d86d9/immutables-0.21-cp313-cp313-manylinux_2_5_x86_64.manylinux1_x86_64.manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:b274a52da9b106db55eceb93fc1aea858c4e6f4740189e3548e38613eafc2021", size = 104898, upload-time = "2024-10-10T00:54:32.295Z" },
+    { url = "https://files.pythonhosted.org/packages/93/fa/d46bfe92f2c66d35916344176ff87fa839aac9c16849652947e722b7a15f/immutables-0.21-cp313-cp313-musllinux_1_2_aarch64.whl", hash = "sha256:338bede057250b33716a3e4892e15df0bf5a5ddbf1d67ead996b3e680b49ef9e", size = 99966, upload-time = "2024-10-10T00:54:34.046Z" },
+    { url = "https://files.pythonhosted.org/packages/d7/f5/2a19e2e095f7a39d8d77dcc10669734d2d99773ce00c99bdcfeeb7d714e6/immutables-0.21-cp313-cp313-musllinux_1_2_x86_64.whl", hash = "sha256:8781c89583b68f604cf30f0978b722165824c3075888639fde771bf1a3e12dc0", size = 101773, upload-time = "2024-10-10T00:54:35.851Z" },
+    { url = "https://files.pythonhosted.org/packages/86/80/5b6ee53f836cf2067ced997efbf2ce20890627f150c3089ea50cf607e783/immutables-0.21-cp313-cp313-win32.whl", hash = "sha256:e97ea83befad873712f283c0cccd630f70cba753e207b4868af28d5b85e9dc54", size = 30988, upload-time = "2024-10-10T00:54:37.618Z" },
+    { url = "https://files.pythonhosted.org/packages/ff/07/f623e6da78368fc0b1772f4877afbf60f34c4cc93f1a8f1006507afa21ec/immutables-0.21-cp313-cp313-win_amd64.whl", hash = "sha256:cfcb23bd898f5a4ef88692b42c51f52ca7373a35ba4dcc215060a668639eb5da", size = 35147, upload-time = "2024-10-10T00:54:38.558Z" },
 ]
 
 [[package]]

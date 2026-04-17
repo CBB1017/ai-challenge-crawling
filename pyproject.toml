@@ -28,6 +28,7 @@ dependencies = [
     "uv==0.7.21",
     "uvicorn==0.35.0",
     "redis>=5.2.0",
+    "contextvars>=2.4",
 ]
 
 [dependency-groups]
