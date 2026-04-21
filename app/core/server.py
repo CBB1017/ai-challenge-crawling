@@ -11,6 +11,7 @@ from mcp.server.fastmcp import FastMCP, Context
 from app.core.utils import clean_user_name
 from app.crawler.approval import ApprovalCrawler
 from app.crawler.attendance import AttendanceCrawler
+from app.crawler.email import EmailCrawler
 from app.crawler.meeting import MeetingRoomCrawler
 from app.crawler.overtime import OvertimeCalculator, get_list_for_submission, get_summary_for_report
 from app.models.models import OvertimeRequestModel, LeaveRequestModel
@@ -543,3 +544,42 @@ async def request_for_leave(
             
             logger.exception("휴가 신청 도구 실행 중 오류")
             return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
+
+@mcp.tool()
+@requires_cookies
+async def get_recent_emails(
+        ctx: Context = None,
+        cookies: list = None
+) -> str:
+    """
+    최근 받은 이메일 목록을 조회하고 요약합니다.
+    안읽은 메일 여부, 보낸 사람, 제목, 수신 시간을 포함합니다.
+    """
+    logger.info("최신 이메일 목록 조회 요청")
+
+    try:
+        meta = getattr(ctx.request_context, 'meta', {}) or {}
+        user_id = getattr(meta, "userId", None)
+
+        async with EmailCrawler(cookies, user_id) as crawler:
+            emails = await crawler.fetch_recent_emails()
+
+            if not emails:
+                return json.dumps({"status": "success", "message": "최근 받은 메일이 없습니다."}, ensure_ascii=False)
+
+            # 요약 정보 생성
+            total_count = len(emails)
+            unread_count = sum(1 for e in emails if e["is_unread"])
+
+            result = {
+                "status": "success",
+                "summary": f"총 {total_count}개의 메일이 있으며, 그 중 {unread_count}개가 읽지 않은 메일입니다.",
+                "emails": emails
+            }
+
+            logger.success(f"이메일 {total_count}건 조회 완료")
+            return json.dumps(result, ensure_ascii=False)
+
+    except Exception as e:
+        logger.exception("이메일 조회 중 오류 발생")
+        return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
