@@ -8,6 +8,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from app.core.config import LoggingMiddleware
+from app.core.otel import setup_otel
 from app.core.server import mcp
 from app.crawler.base import BaseCrawler, cdp_manager
 from app.session.session_manager import save_session
@@ -49,6 +50,7 @@ async def lifespan(app: FastAPI):
 
 # FastAPI 앱 설정
 app = FastAPI(title="Groupware Auth Proxy", lifespan=lifespan)
+setup_otel(app)
 app.add_middleware(LoggingMiddleware)
 
 # 요청/응답 모델 정의
