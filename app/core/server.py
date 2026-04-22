@@ -547,39 +547,106 @@ async def request_for_leave(
 
 @mcp.tool()
 @requires_cookies
-async def get_recent_emails(
+async def get_email_list_simple(
         ctx: Context = None,
         cookies: list = None
 ) -> str:
     """
-    최근 받은 이메일 목록을 조회하고 요약합니다.
-    안읽은 메일 여부, 보낸 사람, 제목, 수신 시간을 포함합니다.
-    """
-    logger.info("최신 이메일 목록 조회 요청")
+    최근 수신된 이메일의 기본 목록(제목, 보낸 사람, 수신 시간)을 조회합니다.
+    본문 요약이나 첨부파일 정보는 포함하지 않으며, 현재 메일함의 상태를 빠르게 훑어볼 때 적합합니다.
 
+    [사용 시기]
+    - "새로 온 메일 리스트 보여줘", "최근 이메일 목록 확인해줘" 등 제목 위주의 빠른 확인이 필요할 때.
+    - 특정 메일의 내용을 보기 전에 전체적인 수신 현황을 파악하고 싶을 때.
+
+    [주의 사항]
+    - count는 최대 20개까지 설정 가능하며, 기본값은 10개입니다.
+    """
     try:
         meta = getattr(ctx.request_context, 'meta', {}) or {}
-        user_id = getattr(meta, "userId", None)
-
+        user_id = getattr(meta, "userId", None) if meta else None
         async with EmailCrawler(cookies, user_id) as crawler:
-            emails = await crawler.fetch_recent_emails()
+            emails = await crawler.fetch_email_list(limit=10)
+            # 불필요한 토큰 제거 후 리턴
+            for e in emails: e.pop("csrf_token", None)
+            return json.dumps({"status": "success", "data": emails}, ensure_ascii=False)
+    except Exception as e:
+        logger.error(f"메일 목록 조회 오류: {e}")
+        return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
 
-            if not emails:
-                return json.dumps({"status": "success", "message": "최근 받은 메일이 없습니다."}, ensure_ascii=False)
 
-            # 요약 정보 생성
-            total_count = len(emails)
-            unread_count = sum(1 for e in emails if e["is_unread"])
+@mcp.tool()
+@requires_cookies
+async def get_single_email_detail(
+        index: int = 0,
+        ctx: Context = None,
+        cookies: list = None
+) -> str:
+    """
+    특정 순번에 위치한 이메일 하나의 상세 정보(제목, 보낸 사람, 시간, 본문 요약, 첨부파일 목록)를 조회합니다.
+    본문은 최대 300자까지 요약되며 이미지는 제외됩니다.
+
+    [사용 시기]
+    - "첫 번째 메일 내용 알려줘", "최근 온 메일 상세하게 보여줘" 등 특정 메일의 구체적인 내용과 첨부파일 확인이 필요할 때.
+    - index 파라미터는 0이 가장 최근 메일이며, 1, 2 순으로 이전 메일을 의미합니다.
+    """
+    try:
+        meta = getattr(ctx.request_context, 'meta', {}) or {}
+        user_id = getattr(meta, "userId", None) if meta else None
+        async with EmailCrawler(cookies, user_id) as crawler:
+            emails = await crawler.fetch_email_list(limit=index + 1)
+            if not emails or index >= len(emails):
+                return json.dumps({"status": "fail", "message": f"해당 순번({index})의 메일을 찾을 수 없습니다."}, ensure_ascii=False)
+
+            target = emails[index]
+            detail = await crawler.fetch_email_detail(target["csrf_token"])
 
             result = {
-                "status": "success",
-                "summary": f"총 {total_count}개의 메일이 있으며, 그 중 {unread_count}개가 읽지 않은 메일입니다.",
-                "emails": emails
+                "subject": target["subject"],
+                "sender": target["sender"],
+                "date_time": target["date_time"],
+                "content_summary": detail["content"],
+                "attachments": detail["attachments"]
             }
-
-            logger.success(f"이메일 {total_count}건 조회 완료")
-            return json.dumps(result, ensure_ascii=False)
-
+            return json.dumps({"status": "success", "data": result}, ensure_ascii=False)
     except Exception as e:
-        logger.exception("이메일 조회 중 오류 발생")
+        logger.error(f"메일 상세 조회 오류: {e}")
+        return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
+
+
+@mcp.tool()
+@requires_cookies
+async def get_multiple_emails_with_summary(
+        ctx: Context = None,
+        cookies: list = None
+) -> str:
+    """
+    최근 수신된 여러 개의 이메일에 대해 각각의 제목, 본문 요약, 첨부파일 목록을 한 번에 조회합니다.
+    각 메일의 본문은 300자 내외로 요약되어 제공됩니다.
+
+    [사용 시기]
+    - "최근 온 메일들 요약해서 알려줘", "오늘 온 메일들 무슨 내용이야?" 등 여러 메일의 내용을 일괄적으로 파악하고 싶을 때.
+    - 한 번에 여러 페이지를 크롤링하므로 단순 목록 조회보다는 시간이 더 소요될 수 있습니다.
+
+    [주의 사항]
+    - count는 최대 20개까지 설정 가능하며, 기본값은 5개입니다.
+    """
+    try:
+        meta = getattr(ctx.request_context, 'meta', {}) or {}
+        user_id = getattr(meta, "userId", None) if meta else None
+        async with EmailCrawler(cookies, user_id) as crawler:
+            emails = await crawler.fetch_email_list(limit=10)
+            results = []
+            for e in emails:
+                detail = await crawler.fetch_email_detail(e["csrf_token"])
+                results.append({
+                    "subject": e["subject"],
+                    "sender": e["sender"],
+                    "date_time": e["date_time"],
+                    "content_summary": detail["content"],
+                    "attachments": detail["attachments"]
+                })
+            return json.dumps({"status": "success", "data": results}, ensure_ascii=False)
+    except Exception as e:
+        logger.error(f"다중 메일 요약 오류: {e}")
         return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
