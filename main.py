@@ -10,10 +10,10 @@ from pydantic import BaseModel
 from app.core.config import LoggingMiddleware
 from app.core.otel import setup_otel
 from app.core.server import mcp
-from app.crawler.base import BaseCrawler, cdp_manager
-from app.session.session_manager import save_session
+from app.crawler.base import cdp_manager
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from app.api.router import router as api_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -52,11 +52,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Groupware Auth Proxy", lifespan=lifespan)
 setup_otel(app)
 app.add_middleware(LoggingMiddleware)
-
-# 요청/응답 모델 정의
-class LoginRequest(BaseModel):
-    userId: str
-    password: str
+app.include_router(api_router)
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request, exc):
@@ -65,43 +61,6 @@ async def validation_exception_handler(request, exc):
         status_code=422,
         content={"detail": exc.errors(), "body": exc.body},
     )
-
-@app.post("/api/login")
-async def login_endpoint(request: LoginRequest):
-    """그룹웨어 로그인을 수행하고 유저 정보와 쿠키를 반환합니다."""
-    logger.info(f"정적 로그인 시도 중 (User: {request.userId})...")
-    try:
-        async with BaseCrawler(user_id=request.userId, password=request.password) as crawler:
-            success, cookies, data = await crawler.login()
-
-            if not success:
-                error_message = (data or {}).get("error") or "로그인 시 오류가 발생했습니다."
-                return {
-                    "status": "fail",
-                    "message": error_message,
-                    "user": None
-                }
-
-            await save_session(data.get("userId"), cookies)
-
-            return {
-                "status": "success",
-                "message": "Login successful",
-                "cookies": cookies,  # 리스트 형태의 쿠키
-                "user": {
-                    "nameAndPosition": data.get("username"), # "문병찬 대리"
-                    "dept": data.get("dept"),          # "DX 2Team"
-                    "userId": data.get("userId")         # "bc.mun"
-                }
-            }
-
-    except Exception as e:
-        logger.exception(f"로그인 도중 예외 발생: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/status")
-async def status():
-    return {"status": "FastAPI is running"}
 
 if __name__ == "__main__":
     # 환경 변수에서 포트 읽기
