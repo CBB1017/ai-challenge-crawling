@@ -19,7 +19,6 @@ class EmailCrawler(BaseCrawler):
         except Exception as e:
             logger.error(f"이메일 목록 페이지 로딩 실패: {e}")
             return []
-        
         content = await self.page.content()
         soup = BeautifulSoup(content, "html.parser")
         table = soup.find("table", id="tblRecvMailList")
@@ -42,6 +41,14 @@ class EmailCrawler(BaseCrawler):
                 logger.trace(f"행 {i}: 컬럼 부족으로 건너뜀")
                 continue
             
+            # 첨부파일 아이콘 확인 (보통 2번째 또는 3번째 td)
+            # 사용자의 설명에 따르면 <td class="table_list" ...><img src="...Attachment.gif"> 가 존재
+            has_attachment = False
+            for col in cols[:3]:
+                if col.find("img", src=re.compile(r"Attachment\.gif", re.I)):
+                    has_attachment = True
+                    break
+
             # 보낸 사람 (3번째 td)
             sender_col = cols[2]
             sender_name = sender_col.get_text(strip=True)
@@ -63,12 +70,13 @@ class EmailCrawler(BaseCrawler):
             # 수신 시간 (5번째 td)
             date_time = cols[4].get_text(strip=True)
             
-            logger.debug(f"[{i+1}/{len(rows)}] 메일 정보 추출: {sender_name} - {subject[:20]}...")
+            logger.debug(f"[{i+1}/{len(rows)}] 메일 정보 추출: {sender_name} - {subject[:20]}... (첨부: {has_attachment})")
             emails.append({
                 "sender": sender_name,
                 "subject": subject,
                 "date_time": date_time,
-                "csrf_token": csrf_token
+                "csrf_token": csrf_token,
+                "has_attachment": has_attachment
             })
         
         logger.info(f"이메일 {len(emails)}건 수집 완료")
@@ -86,7 +94,7 @@ class EmailCrawler(BaseCrawler):
         
         try:
             await self.page.goto(detail_url, timeout=15000, wait_until="domcontentloaded")
-            await asyncio.sleep(0.5)
+            # await asyncio.sleep(0.5)
             logger.debug("상세 본문 페이지 로드 완료 및 파싱 시작")
             content_html = await self.page.content()
         except Exception as e:
@@ -94,8 +102,29 @@ class EmailCrawler(BaseCrawler):
             return {"content": "본문 로딩 실패", "attachments": []}
             
         soup = BeautifulSoup(content_html, "html.parser")
-        
-        # 1. 이미지, 스크립트, 스타일 제거
+
+        # 0. 대용량 첨부파일 추출 (ico_clip_orange.gif 확인)
+        attachments = []
+        large_attachment_icons = soup.find_all("img", src=re.compile(r"ico_clip_orange\.gif", re.I))
+        for icon in large_attachment_icons:
+            # 보통 img 태그 근처의 <a> 태그를 찾음
+            # 사용자 예시: <tr> <img ...> <td>&nbsp;</td> <td><a href="...">...</a> ...
+            parent_tr = icon.find_parent("tr")
+            if parent_tr:
+                links = parent_tr.find_all("a")
+                for link in links:
+                    href = link.get("href", "")
+                    if href and not href.startswith("javascript"):
+                        name = link.get_text(strip=True)
+                        if not name:
+                            # 텍스트가 없는 경우 (이미지 링크 등)
+                            continue
+                        
+                        if not any(a["url"] == href for a in attachments):
+                            attachments.append({"name": f"[대용량] {name}", "url": href})
+                            logger.info(f"대용량 첨부파일 발견: {name}")
+
+        # 1. 이미지, 스크립트, 스타일 제거 (대용량 첨부파일 아이콘 확인 후 제거)
         logger.debug("본문 정제 시작 (스크립트/스타일/이미지 제거)")
         for s in soup(["script", "style", "img"]):
             s.decompose()
@@ -105,26 +134,56 @@ class EmailCrawler(BaseCrawler):
         summary = text[:300] + ("..." if len(text) > 300 else "")
         logger.debug(f"본문 요약 완료 (약 {len(summary)}자)")
         
-        # 3. 첨부파일 추출
-        logger.debug("첨부파일 추출 시도")
-        attachments = []
-        attach_links = soup.find_all("a", href=re.compile(r"download|file|attach", re.I))
-        for link in attach_links:
+        # 3. 일반 첨부파일 추출
+        logger.debug("일반 첨부파일 추출 시도 (패턴: download|file|attach)")
+        
+        # <a> 태그 중 href나 onclick에 키워드가 포함된 것들을 찾음
+        potential_links = soup.find_all("a")
+        pattern = re.compile(r"download|file|attach", re.I)
+        
+        for link in potential_links:
             href = link.get("href", "")
-            if not href:
+            onclick = link.get("onclick", "")
+            
+            is_attachment = False
+            if href and pattern.search(href):
+                is_attachment = True
+            elif onclick and pattern.search(onclick):
+                is_attachment = True
+                # onclick에서 URL 추출 시도 (예: downloadFile('url'))
+                if not href or href.startswith("javascript") or href == "#":
+                    url_match = re.search(r"['\"]([^'\"]*(?:download|file|attach)[^'\"]*)['\"]", onclick, re.I)
+                    if url_match:
+                        href = url_match.group(1)
+                    else:
+                        href = f"javascript:{onclick}"
+
+            if not is_attachment or not href:
                 continue
                 
             # 상대 경로 처리
             if href.startswith("./"):
                 href = f"{self.base_url}/email/{href[2:]}"
-            elif href.startswith("/"):
+            elif href.startswith("/") and not href.startswith("//"):
                 domain_match = re.match(r"(https?://[^/]+)", self.base_url)
                 if domain_match:
                     href = f"{domain_match.group(1)}{href}"
             
             name = link.get_text(strip=True) or link.get("title", "첨부파일")
-            attachments.append({"name": name, "url": href})
             
+            # 중복 제거 (URL 기준)
+            if not any(a["url"] == href for a in attachments):
+                attachments.append({"name": name, "url": href})
+                logger.info(f"첨부파일 발견: {name} (URL: {href})")
+            
+        if not attachments:
+            if "첨부" in text:
+                logger.warning("본문에 '첨부' 단어가 있으나 추출된 첨부파일이 없습니다. HTML 구조 확인이 필요할 수 있습니다.")
+                # 분석을 위해 <a> 태그들이나 특정 영역의 HTML 일부를 로그로 남김 (보안 주의)
+                # soup.find_all("a")[:5] 등
+            else:
+                logger.debug("검색된 첨부파일이 없습니다.")
+
         logger.success(f"상세 정보 추출 성공: 본문 요약 및 첨부파일 {len(attachments)}건")
         return {
             "content": summary,

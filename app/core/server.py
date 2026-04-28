@@ -629,7 +629,7 @@ async def get_multiple_emails_with_summary(
     - 한 번에 여러 페이지를 크롤링하므로 단순 목록 조회보다는 시간이 더 소요될 수 있습니다.
 
     [주의 사항]
-    - count는 최대 20개까지 설정 가능하며, 기본값은 5개입니다.
+    - count는 최대 20개까지 설정 가능하며, 기본값은 10개입니다.
     """
     try:
         meta = getattr(ctx.request_context, 'meta', {}) or {}
