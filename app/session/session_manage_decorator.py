@@ -3,7 +3,7 @@ import json
 
 from loguru import logger
 
-from app.session.session_manager import get_session
+from app.session.session_manager import get_session, save_session
 
 
 def requires_cookies(func):
@@ -65,9 +65,43 @@ def requires_cookies(func):
         # 6. 확보된 쿠키를 kwargs에 주입하여 원래 함수 실행
         kwargs['cookies'] = cached_cookies
 
-        # 만약 원래 함수가 cookies라는 파라미터를 명시적으로 받지 않는다면
-        # TypeError가 날 수 있으므로 주의해야 합니다.
-        # (request_overtime_approval 함수 시그니처에 cookies 파라미터가 없으면 안 됨)
+        return await func(*args, **kwargs)
+
+    return wrapper
+
+
+def requires_system_session(func):
+    """시스템 계정(LOGIN_INFO)의 세션을 사용하여 쿠키를 주입하는 데코레이터"""
+
+    @functools.wraps(func)
+    async def wrapper(*args, **kwargs):
+        from app.core.config import LOGIN_INFO
+        user_id = LOGIN_INFO["username"]
+
+        # 1. Redis에서 세션 확인
+        cached_cookies = await get_session(user_id)
+
+        # 2. 세션이 없으면 자동 로그인 시도
+        if not cached_cookies:
+            logger.info(f"[{user_id}] 유효한 세션이 없습니다. 자동 로그인을 시도합니다.")
+            from app.crawler.base import BaseCrawler
+            
+            # LOGIN_INFO의 계정 정보를 사용하여 로그인 시도
+            async with BaseCrawler(user_id=user_id, password=LOGIN_INFO["password"]) as crawler:
+                success, cookies, _ = await crawler.login()
+                if success:
+                    await save_session(user_id, cookies)
+                    cached_cookies = cookies
+                else:
+                    logger.error(f"[{user_id}] 자동 로그인 실패")
+                    return json.dumps({
+                        "status": "error",
+                        "code": "LOGIN_FAILED",
+                        "message": "자동 로그인에 실패했습니다. 계정 정보를 확인해주세요."
+                    }, ensure_ascii=False)
+
+        # 3. 확보된 쿠키를 kwargs에 주입
+        kwargs['cookies'] = cached_cookies
 
         return await func(*args, **kwargs)
 

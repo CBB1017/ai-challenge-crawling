@@ -106,8 +106,8 @@ async def crawling_action(
         data = await crawler.fetch_reservations(room_name=target_room)
         return data
     elif action == "birthday":
-        crawler = EtcCrawler(login_info)
-        data = await crawler.fetch_birthdays()
+        async with EtcCrawler(user_id=os.environ.get("LOGIN_ID")) as crawler:
+            data = await crawler.fetch_birthdays()
         return data
     else:
         raise HTTPException(status_code=400, detail="지원하지 않는 action")

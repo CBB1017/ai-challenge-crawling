@@ -124,39 +124,39 @@ class EmailCrawler(BaseCrawler):
                             attachments.append({"name": f"[대용량] {name}", "url": href})
                             logger.info(f"대용량 첨부파일 발견: {name}")
 
-        # 1. 이미지, 스크립트, 스타일 제거 (대용량 첨부파일 아이콘 확인 후 제거)
-        logger.debug("본문 정제 시작 (스크립트/스타일/이미지 제거)")
-        for s in soup(["script", "style", "img"]):
-            s.decompose()
-            
-        # 2. 본문 300자 요약 (이미지는 무시됨)
-        text = soup.get_text(separator=" ", strip=True)
-        summary = text[:300] + ("..." if len(text) > 300 else "")
-        logger.debug(f"본문 요약 완료 (약 {len(summary)}자)")
-        
-        # 3. 일반 첨부파일 추출
-        logger.debug("일반 첨부파일 추출 시도 (패턴: download|file|attach)")
+        # 3. 첨부파일 추출을 먼저 수행 (기존 0번은 유지하되 1, 2번 위치를 뒤로 밀어 정보를 보존)
+        # 3-1. 일반 첨부파일 추출
+        logger.debug("일반 첨부파일 추출 시도 (패턴: download|file|attach|zip|pdf|docx|xlsx|pptx)")
         
         # <a> 태그 중 href나 onclick에 키워드가 포함된 것들을 찾음
         potential_links = soup.find_all("a")
-        pattern = re.compile(r"download|file|attach", re.I)
+        pattern = re.compile(r"download|file|attach|\.(zip|pdf|docx?|xlsx?|pptx?)$", re.I)
         
         for link in potential_links:
             href = link.get("href", "")
             onclick = link.get("onclick", "")
             
             is_attachment = False
-            if href and pattern.search(href):
+            if href and pattern.search(href.split("?")[0]): # 쿼리 스트링 제외하고 확장자 체크
                 is_attachment = True
             elif onclick and pattern.search(onclick):
                 is_attachment = True
-                # onclick에서 URL 추출 시도 (예: downloadFile('url'))
+                # onclick에서 URL 추출 시도
                 if not href or href.startswith("javascript") or href == "#":
-                    url_match = re.search(r"['\"]([^'\"]*(?:download|file|attach)[^'\"]*)['\"]", onclick, re.I)
+                    url_match = re.search(r"['\"]([^'\"]*(?:download|file|attach|zip|pdf)[^'\"]*)['\"]", onclick, re.I)
                     if url_match:
                         href = url_match.group(1)
                     else:
                         href = f"javascript:{onclick}"
+
+            # 추가: a 태그 내부의 img 태그 src나 alt 등에서 확장자나 키워드가 발견되는 경우 보완
+            if not is_attachment:
+                img_child = link.find("img")
+                if img_child:
+                    img_src = img_child.get("src", "")
+                    img_alt = img_child.get("alt", "")
+                    if pattern.search(img_src) or pattern.search(img_alt):
+                        is_attachment = True
 
             if not is_attachment or not href:
                 continue
@@ -169,12 +169,29 @@ class EmailCrawler(BaseCrawler):
                 if domain_match:
                     href = f"{domain_match.group(1)}{href}"
             
-            name = link.get_text(strip=True) or link.get("title", "첨부파일")
+            # 이름 추출: 텍스트 -> alt -> title -> "첨부파일"
+            name = link.get_text(strip=True)
+            if not name:
+                img_child = link.find("img")
+                if img_child:
+                    name = img_child.get("alt") or img_child.get("title")
+            if not name:
+                name = link.get("title", "첨부파일")
             
             # 중복 제거 (URL 기준)
             if not any(a["url"] == href for a in attachments):
                 attachments.append({"name": name, "url": href})
                 logger.info(f"첨부파일 발견: {name} (URL: {href})")
+
+        # 1. 이미지, 스크립트, 스타일 제거 (첨부파일 추출 후 수행)
+        logger.debug("본문 정제 시작 (스크립트/스타일/이미지 제거)")
+        for s in soup(["script", "style", "img"]):
+            s.decompose()
+            
+        # 2. 본문 300자 요약
+        text = soup.get_text(separator=" ", strip=True)
+        summary = text[:300] + ("..." if len(text) > 300 else "")
+        logger.debug(f"본문 요약 완료 (약 {len(summary)}자)")
             
         if not attachments:
             if "첨부" in text:
