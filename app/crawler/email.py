@@ -82,11 +82,11 @@ class EmailCrawler(BaseCrawler):
         logger.info(f"이메일 {len(emails)}건 수집 완료")
         return emails
 
-    async def fetch_email_detail(self, csrf_token: str) -> Dict:
-        """이메일 상세 본문(Iframe)에서 텍스트와 첨부파일을 추출합니다."""
+    async def fetch_email_detail(self, csrf_token: str, hint_has_attachment: bool = False) -> Dict:
+        """이메일 상세 본문(Iframe)에서 텍스트와 첨부파일 존재 여부를 추출합니다."""
         if not csrf_token:
             logger.warning("CSRF 토큰이 없어 상세 정보를 가져올 수 없습니다.")
-            return {"content": "상세 내용을 가져올 수 없습니다. (토큰 없음)", "attachments": []}
+            return {"content": "상세 내용을 가져올 수 없습니다. (토큰 없음)", "has_attachment": False}
 
         # 사용자가 지정한 Iframe 주소로 이동
         detail_url = f"{self.base_url}/email/DocViewBodyIframe?csrf={csrf_token}&logdown=N"
@@ -94,117 +94,36 @@ class EmailCrawler(BaseCrawler):
         
         try:
             await self.page.goto(detail_url, timeout=15000, wait_until="domcontentloaded")
-            # await asyncio.sleep(0.5)
             logger.debug("상세 본문 페이지 로드 완료 및 파싱 시작")
             content_html = await self.page.content()
         except Exception as e:
             logger.error(f"이메일 상세 본문 로딩 실패: {e}")
-            return {"content": "본문 로딩 실패", "attachments": []}
+            return {"content": "본문 로딩 실패", "has_attachment": hint_has_attachment}
             
         soup = BeautifulSoup(content_html, "html.parser")
 
-        # 0. 대용량 첨부파일 추출 (ico_clip_orange.gif 확인)
-        attachments = []
-        large_attachment_icons = soup.find_all("img", src=re.compile(r"ico_clip_orange\.gif", re.I))
-        for icon in large_attachment_icons:
-            # 보통 img 태그 근처의 <a> 태그를 찾음
-            # 사용자 예시: <tr> <img ...> <td>&nbsp;</td> <td><a href="...">...</a> ...
-            parent_tr = icon.find_parent("tr")
-            if parent_tr:
-                links = parent_tr.find_all("a")
-                for link in links:
-                    href = link.get("href", "")
-                    if href and not href.startswith("javascript"):
-                        name = link.get_text(strip=True)
-                        if not name:
-                            # 텍스트가 없는 경우 (이미지 링크 등)
-                            continue
-                        
-                        if not any(a["url"] == href for a in attachments):
-                            attachments.append({"name": f"[대용량] {name}", "url": href})
-                            logger.info(f"대용량 첨부파일 발견: {name}")
+        # 0. 대용량 첨부파일 여부 확인 (ico_clip_orange.gif 확인)
+        has_large_attachment = soup.find("img", src=re.compile(r"ico_clip_orange\.gif", re.I)) is not None
+        if has_large_attachment:
+            logger.info("대용량 첨부파일 아이콘 발견")
 
-        # 3. 첨부파일 추출을 먼저 수행 (기존 0번은 유지하되 1, 2번 위치를 뒤로 밀어 정보를 보존)
-        # 3-1. 일반 첨부파일 추출
-        logger.debug("일반 첨부파일 추출 시도 (패턴: download|file|attach|zip|pdf|docx|xlsx|pptx)")
-        
-        # <a> 태그 중 href나 onclick에 키워드가 포함된 것들을 찾음
-        potential_links = soup.find_all("a")
-        pattern = re.compile(r"download|file|attach|\.(zip|pdf|docx?|xlsx?|pptx?)$", re.I)
-        
-        for link in potential_links:
-            href = link.get("href", "")
-            onclick = link.get("onclick", "")
-            
-            is_attachment = False
-            if href and pattern.search(href.split("?")[0]): # 쿼리 스트링 제외하고 확장자 체크
-                is_attachment = True
-            elif onclick and pattern.search(onclick):
-                is_attachment = True
-                # onclick에서 URL 추출 시도
-                if not href or href.startswith("javascript") or href == "#":
-                    url_match = re.search(r"['\"]([^'\"]*(?:download|file|attach|zip|pdf)[^'\"]*)['\"]", onclick, re.I)
-                    if url_match:
-                        href = url_match.group(1)
-                    else:
-                        href = f"javascript:{onclick}"
+        # 최종 첨부파일 여부: 목록에서의 힌트 또는 본문 내 대용량 첨부 아이콘 존재 여부
+        has_attachment = hint_has_attachment or has_large_attachment
 
-            # 추가: a 태그 내부의 img 태그 src나 alt 등에서 확장자나 키워드가 발견되는 경우 보완
-            if not is_attachment:
-                img_child = link.find("img")
-                if img_child:
-                    img_src = img_child.get("src", "")
-                    img_alt = img_child.get("alt", "")
-                    if pattern.search(img_src) or pattern.search(img_alt):
-                        is_attachment = True
-
-            if not is_attachment or not href:
-                continue
-                
-            # 상대 경로 처리
-            if href.startswith("./"):
-                href = f"{self.base_url}/email/{href[2:]}"
-            elif href.startswith("/") and not href.startswith("//"):
-                domain_match = re.match(r"(https?://[^/]+)", self.base_url)
-                if domain_match:
-                    href = f"{domain_match.group(1)}{href}"
-            
-            # 이름 추출: 텍스트 -> alt -> title -> "첨부파일"
-            name = link.get_text(strip=True)
-            if not name:
-                img_child = link.find("img")
-                if img_child:
-                    name = img_child.get("alt") or img_child.get("title")
-            if not name:
-                name = link.get("title", "첨부파일")
-            
-            # 중복 제거 (URL 기준)
-            if not any(a["url"] == href for a in attachments):
-                attachments.append({"name": name, "url": href})
-                logger.info(f"첨부파일 발견: {name} (URL: {href})")
-
-        # 1. 이미지, 스크립트, 스타일 제거 (첨부파일 추출 후 수행)
+        # 1. 이미지, 스크립트, 스타일 제거 (본문 텍스트 추출용)
         logger.debug("본문 정제 시작 (스크립트/스타일/이미지 제거)")
         for s in soup(["script", "style", "img"]):
             s.decompose()
             
         # 2. 본문 300자 요약
-        text = soup.get_text(separator=" ", strip=True)
-        summary = text[:300] + ("..." if len(text) > 300 else "")
+        text_clean = soup.get_text(separator=" ", strip=True)
+        summary = text_clean[:300] + ("..." if len(text_clean) > 300 else "")
         logger.debug(f"본문 요약 완료 (약 {len(summary)}자)")
-            
-        if not attachments:
-            if "첨부" in text:
-                logger.warning("본문에 '첨부' 단어가 있으나 추출된 첨부파일이 없습니다. HTML 구조 확인이 필요할 수 있습니다.")
-                # 분석을 위해 <a> 태그들이나 특정 영역의 HTML 일부를 로그로 남김 (보안 주의)
-                # soup.find_all("a")[:5] 등
-            else:
-                logger.debug("검색된 첨부파일이 없습니다.")
 
-        logger.success(f"상세 정보 추출 성공: 본문 요약 및 첨부파일 {len(attachments)}건")
+        logger.success(f"상세 정보 추출 성공: 본문 요약 및 첨부파일 여부({has_attachment})")
         return {
             "content": summary,
-            "attachments": attachments
+            "has_attachment": has_attachment
         }
 
     @property

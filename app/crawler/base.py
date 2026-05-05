@@ -172,7 +172,12 @@ class _CDPConnectionManager:
                 try:
                     if self.browser.is_connected():
                         # 실제 통신이 가능한지 확인 (timeout을 짧게 주어 체크)
-                        await asyncio.wait_for(self.browser.version(), timeout=2.0)
+                        try:
+                            await asyncio.wait_for(self.browser.version, timeout=2.0)
+                        except TypeError:
+                            # 만약 version이 코루틴이 아니라면 (드문 경우) 직접 호출 시도
+                            if callable(self.browser.version):
+                                await asyncio.wait_for(self.browser.version(), timeout=2.0)
                         return self.browser
                 except Exception as e:
                     logger.warning(f"⚠️ 브라우저 Health Check 실패 (재연결 필요): {e}")

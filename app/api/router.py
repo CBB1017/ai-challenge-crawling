@@ -108,7 +108,37 @@ async def crawling_action(
     elif action == "birthday":
         async with EtcCrawler(user_id=os.environ.get("LOGIN_ID")) as crawler:
             data = await crawler.fetch_birthdays()
+        if isinstance(data, dict) and data.get("code") == "SESSION_EXPIRED":
+             async with EtcCrawler(user_id=os.environ.get("LOGIN_ID")) as crawler:
+                data = await crawler.fetch_birthdays()
         return data
+    elif action == "recent-posts":
+        async with EtcCrawler(user_id=os.environ.get("LOGIN_ID")) as crawler:
+            data = await crawler.fetch_recent_posts()
+        if isinstance(data, dict) and data.get("code") == "SESSION_EXPIRED":
+            async with EtcCrawler(user_id=os.environ.get("LOGIN_ID")) as crawler:
+                data = await crawler.fetch_recent_posts()
+        return data
+    elif action == "board-posts":
+        com_seqs = ["7003", "7004", "7010", "7036"]
+        
+        async def fetch_all():
+            all_posts = {}
+            async with EtcCrawler(user_id=os.environ.get("LOGIN_ID")) as crawler:
+                for seq in com_seqs:
+                    posts = await crawler.fetch_component_posts(seq)
+                    # 만약 리스트가 비어있고 세션 만료가 의심된다면 여기서도 체크 가능하지만, 
+                    # fetch_component_posts가 세션 만료 시 []를 리턴하므로 상위에서 재시도 결정
+                    all_posts[seq] = posts
+            return all_posts
+
+        data = await fetch_all()
+        # 모든 결과가 [] 이면 세션 만료 재시도 (단순 게시물 없음과 구분은 어렵지만 안전하게 재시도)
+        if all(not v for v in data.values()):
+            logger.info("모든 게시판 게시물이 0건입니다. 세션 만료 가능성으로 인해 1회 재시도합니다.")
+            data = await fetch_all()
+            
+        return {"status": "success", "data": data}
     else:
         raise HTTPException(status_code=400, detail="지원하지 않는 action")
 

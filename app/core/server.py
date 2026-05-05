@@ -583,11 +583,11 @@ async def get_single_email_detail(
         cookies: list = None
 ) -> str:
     """
-    특정 순번에 위치한 이메일 하나의 상세 정보(제목, 보낸 사람, 시간, 본문 요약, 첨부파일 목록)를 조회합니다.
+    특정 순번에 위치한 이메일 하나의 상세 정보(제목, 보낸 사람, 시간, 본문 요약, 첨부파일 여부)를 조회합니다.
     본문은 최대 300자까지 요약되며 이미지는 제외됩니다.
 
     [사용 시기]
-    - "첫 번째 메일 내용 알려줘", "최근 온 메일 상세하게 보여줘" 등 특정 메일의 구체적인 내용과 첨부파일 확인이 필요할 때.
+    - "첫 번째 메일 내용 알려줘", "최근 온 메일 상세하게 보여줘" 등 특정 메일의 구체적인 내용 확인이 필요할 때.
     - index 파라미터는 0이 가장 최근 메일이며, 1, 2 순으로 이전 메일을 의미합니다.
     """
     try:
@@ -599,14 +599,14 @@ async def get_single_email_detail(
                 return json.dumps({"status": "fail", "message": f"해당 순번({index})의 메일을 찾을 수 없습니다."}, ensure_ascii=False)
 
             target = emails[index]
-            detail = await crawler.fetch_email_detail(target["csrf_token"])
+            detail = await crawler.fetch_email_detail(target["csrf_token"], hint_has_attachment=target.get("has_attachment", False))
 
             result = {
                 "subject": target["subject"],
                 "sender": target["sender"],
                 "date_time": target["date_time"],
                 "content_summary": detail["content"],
-                "attachments": detail["attachments"]
+                "has_attachment": detail["has_attachment"]
             }
             return json.dumps({"status": "success", "data": result}, ensure_ascii=False)
     except Exception as e:
@@ -621,7 +621,7 @@ async def get_multiple_emails_with_summary(
         cookies: list = None
 ) -> str:
     """
-    최근 수신된 여러 개의 이메일에 대해 각각의 제목, 본문 요약, 첨부파일 목록을 한 번에 조회합니다.
+    최근 수신된 여러 개의 이메일에 대해 각각의 제목, 본문 요약, 첨부파일 여부를 한 번에 조회합니다.
     각 메일의 본문은 300자 내외로 요약되어 제공됩니다.
 
     [사용 시기]
@@ -638,13 +638,13 @@ async def get_multiple_emails_with_summary(
             emails = await crawler.fetch_email_list(limit=10)
             results = []
             for e in emails:
-                detail = await crawler.fetch_email_detail(e["csrf_token"])
+                detail = await crawler.fetch_email_detail(e["csrf_token"], hint_has_attachment=e.get("has_attachment", False))
                 results.append({
                     "subject": e["subject"],
                     "sender": e["sender"],
                     "date_time": e["date_time"],
                     "content_summary": detail["content"],
-                    "attachments": detail["attachments"]
+                    "has_attachment": detail["has_attachment"]
                 })
             return json.dumps({"status": "success", "data": results}, ensure_ascii=False)
     except Exception as e:
