@@ -1,5 +1,6 @@
 import asyncio
 import os
+import re
 from datetime import datetime
 from loguru import logger
 
@@ -98,7 +99,7 @@ class ApprovalCrawler(BaseCrawler):
         approval_url = f"{groupware_domain}/Flow/Doc_Write?ActionGubun=APPEND&BoxNo=2&DocKind=2&RtnURL=Form_List?gubun=Doc&FormNo=147757&FormType=PH&FormName=3%2E%EC%9E%94%EC%97%85%2F%ED%8A%B9%EA%B7%BC%28OT%29%EC%8B%A0%EC%B2%AD%EC%84%9C"
         await self.page.goto(approval_url)
         # 결재선 설정 시도
-        line_success = await self.set_approval_line(dept_name, doc_type)
+        line_success = await self.set_approval_line(dept_name, doc_type, "147757")
         if not line_success:
             return {"status": "fail", "message": "결재라인 설정 실패로 중단되었습니다."}
 
@@ -173,8 +174,50 @@ class ApprovalCrawler(BaseCrawler):
 
             await target_frame.wait_for_selector("table", timeout=10000)
 
-            # 5. 결재선 row 찾기 (text-is 대신 has-text)
-            row = target_frame.locator(f"tr:has(td:has-text('{search_keyword}'))").first
+            # 5. 결재선 row 찾기 (개선된 로직)
+            # [회사] DX사업부_근태 관련 과 같은 형식을 모두 포괄할 수 있도록 정규식 구성
+            rows_locator = target_frame.locator("tr")
+            row_count = await rows_locator.count()
+            
+            found_candidates = []
+            for i in range(row_count):
+                row = rows_locator.nth(i)
+                # row의 직접적인 텍스트만 추출하거나 inner_text를 가져와서 검증
+                text = await row.inner_text()
+                if not text: continue
+                
+                clean_text = " ".join(text.split())
+                
+                # 키워드가 포함되어 있는지 확인
+                if search_keyword in clean_text:
+                    # 너무 긴 텍스트(테이블 전체를 담고 있는 컨테이너 행)는 필터링
+                    # 보통 실제 데이터 행은 컬럼 정보만 담고 있어 길이가 짧습니다.
+                    if len(clean_text) < 500:
+                        found_candidates.append({"row": row, "text": clean_text})
+
+            logger.info(f"결재선 매칭 결과: {len(found_candidates)}개 후보 발견 ({search_keyword})")
+
+            if not found_candidates:
+                logger.error(f"결재선을 찾을 수 없습니다: {search_keyword}")
+                return False
+
+            # 후보 중 가장 적절한 것 선택
+            # '근태'를 찾는데 '근무계획수립'이 매칭되는 경우를 방지하기 위해 제외 로직 추가
+            final_match = None
+            if len(found_candidates) > 1:
+                for cand in found_candidates:
+                    logger.info(f"후보: {cand['text']}")
+                    # suffix가 '근태'인 경우 '근무계획수립'이 포함된 행은 우선 제외
+                    if suffix == "근태" and "근무계획수립" in cand["text"]:
+                        continue
+                    final_match = cand
+                    break
+            
+            if not final_match:
+                final_match = found_candidates[0]
+
+            row = final_match["row"]
+            logger.success(f"최종 결재선 선택: {final_match['text']}")
 
             await row.wait_for(state="visible", timeout=10000)
 
@@ -182,95 +225,64 @@ class ApprovalCrawler(BaseCrawler):
             try:
                 await row.click()
                 logger.info(f"결재선 row 클릭 성공: {search_keyword}")
-            except:
-                onclick_script = await row.get_attribute("onclick")
-                if onclick_script:
-                    await target_frame.evaluate(
-                        onclick_script.replace("javascript:", "")
-                    )
-                    logger.info(f"onclick fallback 실행: {search_keyword}")
-                return False
+                # 클릭 후 데이터가 내부적으로 반영될 시간을 잠깐 줍니다.
+                await popup.wait_for_timeout(500)
+            except Exception as e:
+                logger.warning(f"일반 클릭 실패, JS 클릭 시도: {e}")
+                await row.evaluate("el => el.click()")
 
-            await popup.wait_for_timeout(1000)
             # -----------------------------------------------------------
-            # 7. admin_main.CallLine() 직접 호출 및 에러 추적
-            # -----------------------------5t6------------------------------
-            logger.info("자바스크립트 CallLine() 호출하여 데이터 스틸 시도...")
+            # 7. CallLine() 데이터 추출 및 수동 반영 (가장 확실한 방법)
+            # -----------------------------------------------------------
+            logger.info("데이터(CallLine) 추출 및 수동 반영을 시작합니다.")
 
-            # 팝업의 최상위 window에서 원본 JS와 똑같이 실행하며,
-            # 실패할 경우 정확히 "왜" 실패했는지 에러 메시지를 반환합니다.
-            debug_script = """
-                () => {
-                    try {
-                        // 1. 객체 존재 여부 확인
-                        if (!window.admin_main) {
-                            return { status: "fail", msg: "window.admin_main 프레임을 찾을 수 없습니다." };
-                        }
+            # 하단 프레임(admin_main)에서 데이터 확보
+            bottom_frame = next(
+                (f for f in popup.frames if "Line_Bottom" in f.url or f.name == "admin_main"),
+                None
+            )
 
-                        // 2. 함수 존재 여부 확인
-                        if (typeof window.admin_main.CallLine !== 'function') {
-                            return { status: "fail", msg: "CallLine이 함수가 아닙니다. 현재 타입: " + typeof window.admin_main.CallLine };
-                        }
-
-                        // 3. 원본과 동일하게 함수 실행!
-                        const result = window.admin_main.CallLine();
-
-                        // 4. 결과값 검증
-                        if (!result || result.trim() === "") {
-                            return { status: "empty", msg: "함수가 실행되었으나 빈 값을 반환했습니다. (결재선 row 클릭이 인식되지 않았을 확률 높음)" };
-                        }
-
-                        return { status: "success", data: result };
-
-                    } catch (e) {
-                        // 내부에서 에러가 터졌을 경우
-                        return { status: "error", msg: "JS 내부 에러 발생: " + e.message };
-                    }
-                }
-                """
-
-            result_obj = await popup.evaluate(debug_script)
-
-            if result_obj["status"] == "success":
-                v_list = result_obj["data"]
-                logger.success(f"데이터 스틸 완벽 성공: {v_list[:50]}...")
-            else:
-                # 여기서 찍히는 로그를 보면 원인을 100% 알 수 있습니다.
-                logger.error(f"CallLine() 실패 상세 원인: {result_obj['msg']}")
+            if not bottom_frame:
+                logger.error("하단 제어 프레임을 찾을 수 없습니다.")
                 return False
 
-            # 10. 팝업 안에서 부모를 건드리지 않고 조용히 닫기만 함!
-            logger.info("데이터 확보 완료. 팝업을 안전하게 종료합니다.")
-            await popup.close()
+            # 데이터 확보
+            v_list = await bottom_frame.evaluate("() => typeof CallLine === 'function' ? CallLine() : ''")
+            if not v_list or len(v_list) < 10:
+                logger.error("결재선 데이터(CallLine)를 확보하지 못했습니다.")
+                return False
 
-            # 11. 부모 창으로 안전하게 복귀
+            logger.info(f"데이터 확보 성공 ({len(v_list)}자). 부모 창에 직접 주입합니다.")
+
+            # 부모 창에서 NowBuseo 값 동적 획득
+            now_buseo = await self.page.evaluate("() => document.getElementsByName('NowBuseo')[0]?.value || '29'")
+            
+            # 수동 서브밋 실행 (서버 응답 확인까지 대기)
+            async with self.page.expect_response(lambda r: "Doc_Line_View" in r.url, timeout=10000):
+                await self.page.evaluate(f"""(args) => {{
+                    const [val, buseo] = args;
+                    const frm = document.d_form;
+                    if (frm) {{
+                        frm.SignList.value = val;
+                        frm.target = 'DocWrite_Line';
+                        frm.action = 'Doc_Line_View?FormNo={form_no}&NowBuseo=' + buseo + '&SignList=' + encodeURIComponent(val);
+                        frm.submit();
+                    }}
+                }}""", [v_list, now_buseo])
+
+            # 8. 팝업 종료 및 최종 확인
+            if not popup.is_closed():
+                await popup.close()
+
             await self.page.bring_to_front()
-            logger.success("부모 창 복귀 성공. 셀프 서브밋을 준비합니다.")
-
-            # 서브밋을 실행함과 동시에, 서버에서 Doc_Line_View 응답이 올 때까지 기다립니다.
-            # 이렇게 하면 프레임이 깨지든 말든 DOM 에러(Target closed)가 발생하지 않습니다.
-            async with self.page.expect_response(lambda r: "Doc_Line_View" in r.url, timeout=20000):
-                await self.page.evaluate(f"""(val) => {{
-                            const frm = document.d_form;
-                            if (frm) {{
-                                frm.SignList.value = val;
-                                frm.target = 'DocWrite_Line';
-                                frm.action = 'Doc_Line_View?FormNo={form_no}&NowBuseo=29&SignList=' + encodeURIComponent(val);
-                                frm.submit();
-                            }}
-                        }}""", v_list)
-
-            # 13. 프레임 렌더링 확인
-            logger.info("셀프 서브밋 완료, 프레임 갱신 대기 중...")
-
-            # iframe 내부를 뒤질 필요 없이, 부모 창의 SignList에 값이 잘 들어갔는지만 봅니다.
-            final_signlist = await self.page.locator("input[name='SignList']").get_attribute("value")
-
-            if final_signlist and len(final_signlist) > 10:
-                logger.success("결재라인 폼 반영 완벽하게 완료되었습니다!")
+            
+            # SignList에 값이 잘 들어갔는지 최종 검증
+            final_val = await self.page.locator("input[name='SignList']").get_attribute("value")
+            if final_val and len(final_val) > 10:
+                logger.success("결재라인 폼 반영 완벽 성공!")
                 return True
             else:
-                logger.error("서브밋은 되었으나 SignList 값이 비어있습니다.")
+                logger.error("서브밋 후 SignList 값이 비어있습니다.")
                 return False
         except Exception as e:
             logger.error(f"결재라인 설정 실패: {e}")

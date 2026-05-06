@@ -378,8 +378,10 @@ async def request_overtime_approval(
 
                 if is_success:
                     action_name = "결재상신" if data.action_type == "F" else "임시저장"
-                    logger.success(f"{action_name} 성공 확인. URL: {crawler.page.url}")
+                    final_url = crawler.page.url
+                    logger.success(f"{action_name} 성공 확인. URL: {final_url}")
                     result["message"] = f"{user_name}님의 OT 신청 {action_name} 완료"
+                    result["url"] = final_url
                 else:
                     # 실패 시 대화상자 메시지가 있다면 해당 메시지를 결과에 포함
                     error_msg = dialog_messages[-1] if dialog_messages else "페이지 이동 실패"
@@ -523,8 +525,10 @@ async def request_for_leave(
 
                     if is_success:
                         action_name = "결재상신" if data.action_type == "F" else "임시저장"
-                        logger.success(f"{action_name} 성공 확인. URL: {crawler.page.url}")
+                        final_url = crawler.page.url
+                        logger.success(f"{action_name} 성공 확인. URL: {final_url}")
                         result["message"] = f"{user_name}님의 휴가 신청({len(data.leave_data_list)}건) {action_name} 완료"
+                        result["url"] = final_url
                     else:
                         # 실패 시 대화상자 메시지가 있다면 해당 메시지를 결과에 포함
                         error_msg = dialog_messages[-1] if dialog_messages else "페이지 이동 실패"
