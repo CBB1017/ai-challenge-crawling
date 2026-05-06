@@ -14,7 +14,7 @@ from app.crawler.attendance import AttendanceCrawler
 from app.crawler.email import EmailCrawler
 from app.crawler.meeting import MeetingRoomCrawler
 from app.crawler.overtime import OvertimeCalculator, get_list_for_submission, get_summary_for_report
-from app.models.models import OvertimeRequestModel, LeaveRequestModel
+from app.models.models import OvertimeRequestModel, LeaveRequestModel, WorkPlanRequestModel
 from app.session.session_manage_decorator import requires_cookies
 
 load_dotenv()
@@ -653,4 +653,124 @@ async def get_multiple_emails_with_summary(
             return json.dumps({"status": "success", "data": results}, ensure_ascii=False)
     except Exception as e:
         logger.error(f"다중 메일 요약 오류: {e}")
+        return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
+
+
+@mcp.tool()
+@requires_cookies
+async def request_work_plan_approval(
+        request_data: dict,
+        ctx: Context = None,
+        cookies: list = None
+) -> str:
+    """
+    근무계획수립신청서를 자동으로 작성하고 임시저장하거나 결재를 상신합니다.
+    사용자가 '근무계획 수립해줘', '다음 달 근무계획 올려줘' 등의 요청을 할 때 사용합니다.
+
+    [주의 사항]
+    - 연(year)과 월(month) 정보가 필요합니다. 언급이 없으면 기본적으로 올해/다음달 등을 유추하여 시도합니다.
+    - action_type은 결재상신이면 'F', 임시저장이면 'T'입니다. (기본값 'T')
+    """
+    try:
+        data = WorkPlanRequestModel(**request_data)
+        meta = getattr(ctx.request_context, 'meta', {}) or {}
+
+        user_id = getattr(meta, "userId", None) if meta else None
+        user_name = getattr(meta, "userName", None) if meta else None
+        dept_name = getattr(meta, "userDept", None) if meta else None
+
+        if not user_id or not user_name:
+            raise ValueError("userId 또는 userName이 meta 정보에 없습니다.")
+
+    except Exception as e:
+        logger.error(f"근무계획 데이터 파싱 에러: {str(e)}")
+        return json.dumps({
+            "status": "error",
+            "message": "필수 파라미터 누락 또는 데이터 형식이 틀렸습니다.",
+            "details": str(e)
+        }, ensure_ascii=False)
+
+    logger.info(f"근무계획 수립 시작 - 대상: {user_name}, 부서: {dept_name}, 연월: {data.year}-{data.month}, 액션: {data.action_type}")
+
+    try:
+        async with ApprovalCrawler(cookies, user_id) as crawler:
+            result = await crawler.process_work_plan_request(
+                year=data.year,
+                month=data.month,
+                dept_name=dept_name
+            )
+
+            # 상신/저장이 필요한 경우 (이미 승인된 경우가 아닌 경우)
+            if result.get("status") == "success" and result.get("needs_action") is not False:
+                action_name = "결재상신" if data.action_type == "F" else "임시저장"
+
+                # 대화상자 메시지 캡처
+                dialog_messages = []
+
+                async def handle_dialog(dialog):
+                    try:
+                        msg = dialog.message
+                        dialog_messages.append(msg)
+                        logger.info(f"브라우저 대화상자 감지 ({msg}) -> 승인")
+                        await dialog.accept()
+                    except:
+                        pass
+
+                crawler.page.on("dialog", lambda d: asyncio.create_task(handle_dialog(d)))
+
+                logger.info(f"최종 {action_name} 호출: SendFlowData('{data.action_type}')")
+
+                # SendFlowData 함수 로드 대기
+                await crawler.page.wait_for_function("() => typeof SendFlowData === 'function'", timeout=10000)
+                await crawler.page.evaluate(f"SendFlowData('{data.action_type}')")
+
+                # 최종 목적지 URL 도달 확인 함수
+                async def check_final_destination_workplan(target_pattern):
+                    try:
+                        await crawler.page.wait_for_url(target_pattern, timeout=5000)
+                        return True
+                    except Exception:
+                        pass
+
+                    for _ in range(15):
+                        error_dialogs = [m for m in dialog_messages if "저장하시겠습니까" not in m and "상신하시겠습니까" not in m]
+                        if error_dialogs:
+                            logger.warning(f"에러 대화상자 감지로 인한 대기 중단: {error_dialogs[-1]}")
+                            return False
+
+                        for p in crawler.context.pages:
+                            try:
+                                if not p.is_closed() and any(pat in p.url for pat in ["Doc_List", "DocBox_List"]):
+                                    if "Gubun=T" in p.url or ("Sign=F" in p.url and "isTemp=N" in p.url):
+                                        logger.info(f"목적지 페이지 발견(근무계획): {p.url}")
+                                        crawler.page = p
+                                        return True
+                            except:
+                                continue
+                        await asyncio.sleep(0.5)
+                    return False
+
+                if data.action_type == "F":
+                    is_success = await check_final_destination_workplan("**/Flow/Doc_List*")
+                else:
+                    is_success = await check_final_destination_workplan("**/Flow/DocBox_List?Gubun=T*")
+
+                if is_success:
+                    action_name = "결재상신" if data.action_type == "F" else "임시저장"
+                    final_url = crawler.page.url
+                    logger.success(f"{action_name} 성공 확인. URL: {final_url}")
+                    result["message"] = f"{user_name}님의 {data.month}월 근무계획 {action_name} 완료"
+                    result["url"] = final_url
+                else:
+                    error_msg = dialog_messages[-1] if dialog_messages else "페이지 이동 실패"
+                    logger.error(f"{action_name} 실패. 사유: {error_msg}")
+                    result.update({
+                        "status": "fail",
+                        "message": f"{action_name} 중 오류가 발생했습니다: {error_msg}",
+                        "details": error_msg
+                    })
+
+            return json.dumps(result, ensure_ascii=False)
+    except Exception as e:
+        logger.exception("근무계획 수립 도구 실행 중 오류")
         return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)

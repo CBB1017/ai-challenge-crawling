@@ -125,7 +125,7 @@ class ApprovalCrawler(BaseCrawler):
             dept_name
         )
 
-        suffix = "근태" if doc_type in ["OT", "휴가"] else "재무"
+        suffix = "근태" if doc_type in ["OT", "휴가"] else doc_type
         search_keyword = f"{target_dept}_{suffix}"
 
         try:
@@ -619,3 +619,164 @@ class ApprovalCrawler(BaseCrawler):
 
         logger.success(f"휴가 신청 폼 {len(leave_data_list)}건 입력 완벽하게 완료되었습니다.")
         return {"status": "success", "message": "폼 작성 완료"}
+
+    async def process_work_plan_request(
+            self,
+            month: int,
+            year: int = None,
+            dept_name: str = None
+    ):
+        """근무계획수립신청서 프로세스 메인 파이프라인"""
+        groupware_domain = os.environ["GROUPWARE_DOMAIN"]
+
+        if not self.cookies:
+            logger.warning("유효한 세션(쿠키)이 없습니다.")
+            return {"status": "fail", "message": "세션이 만료되었습니다. 다시 로그인해주세요.", "code": "SESSION_EXPIRED"}
+
+        if not month:
+            return {"status": "fail", "message": "월 데이터가 필요합니다."}
+
+        if not year:
+            year = datetime.now().year
+
+        # 1. 근무계획 관리 페이지로 직접 진입 (불필요한 결재 폼 진입 생략)
+        calendar_url = f"{groupware_domain}/AttendR2/AttendOTMonthlyTrans"
+        logger.info(f"근무계획 페이지 직접 이동: {calendar_url}")
+        await self.page.goto(calendar_url, wait_until="networkidle")
+
+        # 2. 연월 데이터 확인 및 이동
+        # 캘린더 페이지는 보통 mainFrame 내부에 있거나 메인 페이지에 직접 로드됩니다.
+        target_found = False
+        max_attempts = 12
+
+        # 적절한 프레임(메인 또는 mainFrame) 찾기
+        content_frame = self.page
+
+        # 모든 프레임을 순회하며 캘린더 헤더가 있는지 확인 (재시도 포함)
+        for attempt in range(6):
+            found_frame = None
+            for f in self.page.frames:
+                try:
+                    count = await f.locator(".fc-toolbar").count()
+                    if count > 0:
+                        found_frame = f
+                        break
+                except:
+                    continue
+
+            if found_frame:
+                content_frame = found_frame
+                logger.info(f"캘린더를 포함한 프레임 발견: {content_frame.name or content_frame.url}")
+                break
+            await self.page.wait_for_timeout(500)
+
+        for _ in range(max_attempts):
+            # h2 요소가 나타날 때까지 대기
+            try:
+                header_locator = content_frame.locator(".fc-toolbar .fc-left h2")
+                await header_locator.wait_for(state="attached", timeout=10000)
+                header_text = await header_locator.inner_text()
+            except Exception as e:
+                logger.error(f"연월 헤더 대기 중 오류: {e}")
+                frames = [f.name or f.url for f in self.page.frames]
+                logger.debug(f"현재 페이지 프레임 목록: {frames}")
+                return {"status": "fail", "message": "연월 데이터를 찾을 수 없습니다."}
+
+            match = re.search(r"(\d{4})년\s*(\d{2})월", header_text)
+            if match:
+                curr_year = int(match.group(1))
+                curr_month = int(match.group(2))
+
+                if curr_year == year and curr_month == month:
+                    target_found = True
+                    break
+                elif curr_year < year or (curr_year == year and curr_month < month):
+                    await content_frame.locator('button.fc-next-button').click()
+                    await self.page.wait_for_timeout(1000)
+                else:
+                    logger.warning(f"요청한 {year}년 {month}월이 현재 페이지({header_text})보다 이전입니다.")
+                    return {"status": "fail", "message": f"요청한 {year}년 {month}월에 대한 근무수립을 진행할 수 없습니다 (이전 월)."}
+            else:
+                logger.error(f"연월 데이터를 파싱할 수 없습니다: {header_text}")
+                return {"status": "fail", "message": "페이지 연월 데이터 확인 실패"}
+
+        if not target_found:
+            return {"status": "fail", "message": "요청한 연월 페이지를 찾을 수 없습니다."}
+
+        # 3. '나의 기본근무계획 불러오기' 클릭
+        # 버튼이 'hidden' 상태일 수 있으므로 evaluate로 강제 클릭 시도
+        self.page.once("dialog", lambda d: asyncio.create_task(d.accept()))
+        try:
+            batch_save_btn = content_frame.locator('button.fc-batchSave-button')
+            await batch_save_btn.wait_for(state="attached", timeout=5000)
+
+            # 보이지 않더라도 JS로 클릭 실행
+            await batch_save_btn.evaluate("el => el.click()")
+            logger.info("'나의 기본근무계획 불러오기' 실행 완료")
+        except Exception as e:
+            logger.error(f"'나의 기본근무계획 불러오기' 실행 실패: {e}")
+            return {"status": "fail", "message": "'나의 기본근무계획 불러오기' 버튼을 찾을 수 없습니다."}
+
+        # 4. 데이터 렌더링 대기 (고정 2초 대기 최적화)
+        # 캘린더에 근무 이벤트(.fc-event-container)가 최소 28개(한 달 일수) 이상 렌더링될 때까지 대기
+        try:
+            await content_frame.wait_for_function(
+                "() => document.querySelectorAll('.fc-event-container').length >= 28",
+                timeout=10000
+            )
+            logger.info("근무계획 데이터 렌더링 완료 확인")
+        except Exception as e:
+            logger.warning(f"데이터 렌더링 확인 타임아웃(또는 데이터 없음): {e}")
+
+        # 5. tblMonthArea 테이블 확인
+        rows = content_frame.locator("#tblMonthArea tbody tr")
+        row_count = await rows.count()
+
+        needs_submission = False
+        if row_count > 0:
+            first_row = rows.nth(0)
+            row_text = await first_row.inner_text()
+            if "승인" not in row_text or "N" in row_text:
+                needs_submission = True
+        else:
+            needs_submission = True
+
+        if needs_submission:
+            btn_write_flow = content_frame.locator(".table_list_rno button.btnWriteFlow")
+            if await btn_write_flow.count() > 0:
+                logger.info("전자결재상신 버튼 클릭 (다이얼로그 수락 및 페이지 이동)")
+
+                # 1. 다이얼로그(확인창) 핸들러 등록
+                self.page.once("dialog", lambda d: asyncio.create_task(d.accept()))
+
+                # 2. 클릭과 동시에 페이지 이동 대기
+                try:
+                    await asyncio.gather(
+                        btn_write_flow.click(),
+                        self.page.wait_for_load_state("networkidle", timeout=15000)
+                    )
+                except Exception as e:
+                    logger.warning(f"클릭 후 대기 중 예외(무시 가능): {e}")
+
+                # 3. Doc_Write 페이지로 전환되었는지 확인 및 추가 대기
+                try:
+                    await self.page.wait_for_url("**/flow/doc_write*", timeout=10000)
+                    logger.info(f"결재 상신 페이지 전환 완료: {self.page.url}")
+                except Exception as e:
+                    logger.error(f"결재 상신 페이지로의 전환이 감지되지 않았습니다: {e}")
+                    return {"status": "fail", "message": "결재 상신 페이지로 이동하지 못했습니다."}
+
+                # 4. 페이지 로딩 및 iframe 대기
+                await self.page.wait_for_load_state("networkidle")
+                await self.page.wait_for_selector("#AspFile", timeout=20000)
+
+                # 5. 결재선 설정 (부서 정보가 있으면 수행)
+                if dept_name:
+                    await self.set_approval_line(dept_name, "근무계획", "28")
+
+                logger.success(f"{year}년 {month}월 근무계획 폼 세팅 완료")
+                return {"status": "success", "message": f"{year}년 {month}월 근무계획 폼 세팅 완료", "cookies": self.cookies}
+            else:
+                return {"status": "fail", "message": "전자결재상신 버튼을 찾을 수 없습니다."}
+        else:
+            return {"status": "success", "message": "이미 승인되었거나 상신된 상태입니다.", "needs_action": False}

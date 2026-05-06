@@ -227,21 +227,9 @@ class EtcCrawler(BaseCrawler):
             await asyncio.sleep(2) # 로딩 대기
             
             # 4. 데이터 추출 (mainFrame 우선 탐색)
-            frame = self.page.frame(name="mainFrame")
-            if frame:
-                logger.info("mainFrame을 찾았습니다. 내부 데이터를 탐색합니다.")
-                # 특정 데이터가 나타날 때까지 대기
-                try:
-                    await frame.wait_for_selector('td[align=left]', timeout=5000)
-                except:
-                    logger.debug("td[align=left] 대기 타임아웃 (데이터가 없을 수 있음)")
-                
-                content_html = await frame.content()
-            else:
-                logger.info("mainFrame이 없습니다. 메인 페이지 데이터를 탐색합니다.")
-                content_html = await self.page.content()
+            content_html = await self.page.content()
 
-            logger.debug(f"대상 HTML 길이: {len(content_html)} 자")
+            # logger.debug(f"대상 HTML 길이: {len(content_html)} 자")
             soup = BeautifulSoup(content_html, "html.parser")
             data_cells = soup.find_all('td', align='left')
             logger.info(f"파싱된 td[align=left] 개수: {len(data_cells)}")

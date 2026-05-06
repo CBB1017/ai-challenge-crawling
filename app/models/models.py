@@ -279,3 +279,79 @@ class LeaveRequestModel(BaseModel):
         self.leave_data_list = expanded_list
         self.skipped_dates = list(set(skipped)) # 중복 제거
         return self
+
+
+class WorkPlanRequestModel(BaseModel):
+    year: Optional[Any] = Field(
+        default=None,
+        validation_alias=AliasChoices('year', 'target_year', 'request_year'),
+        description="근무계획 수립 연도 (예: 2026). 명확히 언급되지 않으면 올해로 자동 설정됩니다."
+    )
+    month: Any = Field(
+        validation_alias=AliasChoices('month', 'target_month', 'request_month'),
+        description="근무계획 수립 월 (예: 6). 필수값입니다."
+    )
+    action_type: Literal["T", "F"] = Field(
+        default="F",
+        description="결재 상신이면 'F', 임시저장이면 'T'. 기본값은 'F'입니다."
+    )
+
+    @field_validator('action_type', mode='before')
+    @classmethod
+    def transform_action_type(cls, v):
+        if isinstance(v, bool):
+            return "T" if v else "F"
+        return v
+
+    @model_validator(mode='before')
+    @classmethod
+    def preprocess_work_plan(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+
+        now = datetime.now()
+        year = data.get('year') or data.get('target_year') or data.get('request_year')
+        month = data.get('month') or data.get('target_month') or data.get('request_month')
+
+        # 1. "2026-06" 형태 처리
+        if isinstance(month, str) and '-' in month:
+            parts = month.split('-')
+            if len(parts) >= 2:
+                data['year'] = parts[0]
+                data['month'] = parts[1]
+                month = data['month']
+        elif isinstance(year, str) and '-' in year:
+            parts = year.split('-')
+            if len(parts) >= 2:
+                data['year'] = parts[0]
+                data['month'] = parts[1]
+                month = data['month']
+
+        # 2. 자연어 처리 (이번달, 다음달 등)
+        if isinstance(month, str) and not month.isdigit():
+            if '다음' in month or '내월' in month:
+                target_date = (now.replace(day=1) + timedelta(days=32)).replace(day=1)
+                data['year'] = target_date.year
+                data['month'] = target_date.month
+            elif '이번' in month or '이' in month:
+                data['year'] = now.year
+                data['month'] = now.month
+            elif '지난' in month or '저번' in month:
+                target_date = (now.replace(day=1) - timedelta(days=1)).replace(day=1)
+                data['year'] = target_date.year
+                data['month'] = target_date.month
+
+        # 3. 디폴트 연도 설정
+        if not data.get('year'):
+            data['year'] = now.year
+
+        return data
+
+    @model_validator(mode='after')
+    def validate_final_state(self) -> 'WorkPlanRequestModel':
+        try:
+            self.year = int(self.year)
+            self.month = int(self.month)
+        except (ValueError, TypeError):
+            raise ValueError("연도와 월이 정상적인 숫자가 아닙니다. 월(month)은 필수입니다.")
+        return self
