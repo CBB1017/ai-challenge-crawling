@@ -84,11 +84,13 @@ def requires_system_session(func):
         # 2. 세션이 없으면 자동 로그인 시도
         if not cached_cookies:
             logger.info(f"[{user_id}] 유효한 세션이 없습니다. 자동 로그인을 시도합니다.")
-            from app.crawler.base import BaseCrawler
             
-            # LOGIN_INFO의 계정 정보를 사용하여 로그인 시도
-            async with BaseCrawler(user_id=user_id, password=LOGIN_INFO["password"]) as crawler:
-                success, cookies, _ = await crawler.login()
+            # self가 있으면 Crawler 인스턴스에서 직접 로그인 호출 (중복 __aenter__ 방지)
+            crawler_instance = None
+            if args and hasattr(args[0], 'login'):
+                crawler_instance = args[0]
+                logger.debug(f"[{user_id}] 기존 Crawler 인스턴스를 사용하여 로그인을 시도합니다.")
+                success, cookies, _ = await crawler_instance.login()
                 if success:
                     await save_session(user_id, cookies)
                     cached_cookies = cookies
@@ -99,6 +101,21 @@ def requires_system_session(func):
                         "code": "LOGIN_FAILED",
                         "message": "자동 로그인에 실패했습니다. 계정 정보를 확인해주세요."
                     }, ensure_ascii=False)
+            else:
+                from app.crawler.base import BaseCrawler
+                # LOGIN_INFO의 계정 정보를 사용하여 로그인 시도
+                async with BaseCrawler(user_id=user_id, password=LOGIN_INFO["password"]) as crawler:
+                    success, cookies, _ = await crawler.login()
+                    if success:
+                        await save_session(user_id, cookies)
+                        cached_cookies = cookies
+                    else:
+                        logger.error(f"[{user_id}] 자동 로그인 실패")
+                        return json.dumps({
+                            "status": "error",
+                            "code": "LOGIN_FAILED",
+                            "message": "자동 로그인에 실패했습니다. 계정 정보를 확인해주세요."
+                        }, ensure_ascii=False)
 
         # 3. 확보된 쿠키를 kwargs에 주입
         kwargs['cookies'] = cached_cookies

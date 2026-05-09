@@ -172,12 +172,7 @@ class _CDPConnectionManager:
                 try:
                     if self.browser.is_connected():
                         # 실제 통신이 가능한지 확인 (timeout을 짧게 주어 체크)
-                        try:
-                            await asyncio.wait_for(self.browser.version, timeout=2.0)
-                        except TypeError:
-                            # 만약 version이 코루틴이 아니라면 (드문 경우) 직접 호출 시도
-                            if callable(self.browser.version):
-                                await asyncio.wait_for(self.browser.version(), timeout=2.0)
+                        await asyncio.wait_for(self.browser.version(), timeout=2.0)
                         return self.browser
                 except Exception as e:
                     logger.warning(f"⚠️ 브라우저 Health Check 실패 (재연결 필요): {e}")
@@ -218,6 +213,10 @@ class BaseCrawler:
         self.user_key = user_id or "anonymous"
         self.user_lock = None
     async def __aenter__(self):
+        # 재진입 방지 (이미 진입한 경우 그대로 반환)
+        if getattr(self, "_entered", False):
+            return self
+
         await crawler_semaphore.acquire()
         max_retries = 2
         for attempt in range(max_retries):
@@ -243,6 +242,7 @@ class BaseCrawler:
                 self.page = await self.context.new_page()
 
                 logger.debug("5. 모든 준비 완료")
+                self._entered = True
                 return self
 
             except Exception as e:
@@ -278,6 +278,9 @@ class BaseCrawler:
             #     logger.info("기존 세션 쿠키를 주입했습니다.")
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
+        if not getattr(self, "_entered", False):
+            return
+
         try:
             # 페이지 종료 (Context는 Pool이 관리하므로 닫지 않음)
             if self.page:
@@ -292,6 +295,7 @@ class BaseCrawler:
                 self.user_lock.release()
 
             crawler_semaphore.release()
+            self._entered = False
             logger.debug(f"🚦 자원 반납 완료 ({self.user_key})")
 
     async def wait_for_frame(self, name, timeout=10):
