@@ -355,3 +355,68 @@ class WorkPlanRequestModel(BaseModel):
         except (ValueError, TypeError):
             raise ValueError("연도와 월이 정상적인 숫자가 아닙니다. 월(month)은 필수입니다.")
         return self
+
+
+class MeetingRoomReservationModel(BaseModel):
+    room_name: str = Field(description="회의실명 (예: '리브라', '에리스')")
+    start_date: str = Field(
+        validation_alias=AliasChoices('start_date', 'reservation_date', 'date'),
+        description="예약 시작 날짜 (YYYY-MM-DD). '오늘', '내일' 등은 자동으로 변환됩니다."
+    )
+    end_date: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices('end_date'),
+        description="예약 종료 날짜 (YYYY-MM-DD). 비어있으면 시작 날짜와 동일하게 설정됩니다."
+    )
+    start_time: str = Field(
+        validation_alias=AliasChoices('start_time', 'start'),
+        description="시작 시간 (HH:mm)"
+    )
+    end_time: str = Field(
+        validation_alias=AliasChoices('end_time', 'end'),
+        description="종료 시간 (HH:mm)"
+    )
+    title: str = Field(
+        validation_alias=AliasChoices('title', 'subject', 'meeting_title'),
+        description="회의 제목"
+    )
+    people_count: Any = Field(
+        default="1", 
+        validation_alias=AliasChoices('people_count', 'participants', 'count', 'inwon'),
+        description="사용 예상 인원 (숫자 또는 문자열)"
+    )
+    description: str = Field(
+        default=".", 
+        validation_alias=AliasChoices('description', 'content', 'body', 'memo'),
+        description="예약 내용"
+    )
+
+    @field_validator('people_count', mode='before')
+    @classmethod
+    def ensure_str_people_count(cls, v):
+        return str(v) if v is not None else "1"
+
+    @model_validator(mode='before')
+    @classmethod
+    def preprocess_dates(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+
+        now = datetime.now()
+        s_date = data.get('start_date') or data.get('reservation_date') or data.get('date')
+        e_date = data.get('end_date')
+
+        def parse_natural_date(val):
+            if isinstance(val, str):
+                if '오늘' in val or '금일' in val:
+                    return now.strftime("%Y-%m-%d")
+                elif '내일' in val or '명일' in val:
+                    return (now + timedelta(days=1)).strftime("%Y-%m-%d")
+                elif '모레' in val:
+                    return (now + timedelta(days=2)).strftime("%Y-%m-%d")
+            return val
+
+        data['start_date'] = parse_natural_date(s_date) or now.strftime("%Y-%m-%d")
+        data['end_date'] = parse_natural_date(e_date) or data['start_date']
+
+        return data

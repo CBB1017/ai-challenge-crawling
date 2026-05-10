@@ -14,7 +14,7 @@ from app.crawler.attendance import AttendanceCrawler
 from app.crawler.email import EmailCrawler
 from app.crawler.meeting import MeetingRoomCrawler
 from app.crawler.overtime import OvertimeCalculator, get_list_for_submission, get_summary_for_report
-from app.models.models import OvertimeRequestModel, LeaveRequestModel, WorkPlanRequestModel
+from app.models.models import OvertimeRequestModel, LeaveRequestModel, WorkPlanRequestModel, MeetingRoomReservationModel
 from app.session.session_manage_decorator import requires_cookies
 
 load_dotenv()
@@ -79,9 +79,62 @@ async def get_meeting_room_status(
 ) -> str:
     """회의실 예약 현황을 조회합니다."""
     logger.info(f"회의실 조회 요청: {room_name}")
+    try:
+        meta = getattr(ctx.request_context, 'meta', {}) or {}
+
+        user_id = getattr(meta, "userId", None) if meta else None
+        user_name = getattr(meta, "userName", None) if meta else None
+        dept_name = getattr(meta, "userDept", None) if meta else None
+        if not user_id or not user_name:
+            raise ValueError("userId 또는 userName이 meta 정보에 없습니다.")
+    except Exception as e:
+        logger.error(f"데이터 파싱 에러(LLM 파라미터 누락): {str(e)}")
+        # LLM에게 어떤 필드가 누락되었는지 피드백을 주어 스스로 수정하게 유도
+        return json.dumps({
+            "status": "error",
+            "message": "필수 파라미터가 누락되었거나 형식이 틀렸습니다. 시스템 컨텍스트에서 로그인 유저의 부서(userDept)와 이름(user_id)을 확인하여 다시 호출해주세요.",
+            "details": str(e)
+        }, ensure_ascii=False)
+    logger.debug(f"get_team_attendance 호출됨 - 부서: {dept_name}")
     async with MeetingRoomCrawler(cookies) as crawler:
         result = await crawler.fetch_reservations(room_name)
         logger.info(f"'{room_name}' 예약 현황 조회 성공")
+        return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool()
+@requires_cookies
+async def book_meeting_room(
+        request_data: dict,
+        ctx: Context = None,
+        cookies: list = None
+) -> str:
+    """
+    회의실 예약을 진행합니다. (단일 날짜 또는 기간 범위 예약 지원)
+    실제 예약을 생성하기 전에 get_meeting_room_status 툴을 호출하여 해당 시간대가 비어있는지 먼저 확인하는 것을 권장합니다.
+
+    [파라미터 가이드]
+    - start_date: 예약 시작일 ('오늘', '내일' 또는 'YYYY-MM-DD')
+    - end_date: 예약 종료일 (기간 예약 시 사용. 생략하면 start_date와 동일하게 설정됨)
+    - start_time, end_time: 'HH:mm' 형식 (예: 14:30)
+    - title: 회의 제목
+    - participants: 참석 인원 (숫자)
+    - description: 상세 내용
+    """
+    try:
+        data = MeetingRoomReservationModel(**request_data)
+    except Exception as e:
+        logger.error(f"회의실 예약 데이터 파싱 에러: {str(e)}")
+        return json.dumps({
+            "status": "error",
+            "message": "필수 파라미터 누락 또는 데이터 형식이 틀렸습니다.",
+            "details": str(e)
+        }, ensure_ascii=False)
+
+    logger.info(f"회의실 예약 시도 데이터: {data.model_dump()}")
+    
+    async with MeetingRoomCrawler(cookies) as crawler:
+        result = await crawler.reserve_meeting_room(data.model_dump())
         return json.dumps(result, ensure_ascii=False)
 
 
