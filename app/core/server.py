@@ -77,7 +77,16 @@ async def get_meeting_room_status(
         ctx: Context = None,
         cookies: list = None
 ) -> str:
-    """회의실 예약 현황을 조회합니다."""
+    """
+    회의실 예약 현황을 조회합니다.
+
+    [조회 가능한 회의실 목록]
+    에리스, 캐프리콘, 리브라, 제미나이, 미라이, 스콜피오, 리오1, 리오2, 리오3, 리오4, 파이시스1, 파이시스2, 파이시스3, 파이시스4, 이클립스, SANTAFE(231호5640)
+
+    [사용 가이드]
+    - 특정 회의실의 현황만 보고 싶다면 해당 이름을 room_name에 입력하세요.
+    - 전체 회의실 현황을 한꺼번에 보고 싶다면 room_name을 빈 문자열("") 또는 "전체"라고 입력하세요.
+    """
     logger.info(f"회의실 조회 요청: {room_name}")
     try:
         meta = getattr(ctx.request_context, 'meta', {}) or {}
@@ -113,7 +122,11 @@ async def book_meeting_room(
     회의실 예약을 진행합니다. (단일 날짜 또는 기간 범위 예약 지원)
     실제 예약을 생성하기 전에 get_meeting_room_status 툴을 호출하여 해당 시간대가 비어있는지 먼저 확인하는 것을 권장합니다.
 
+    [조회 가능한 회의실 목록]
+    에리스, 캐프리콘, 리브라, 제미나이, 미라이, 스콜피오, 리오1, 리오2, 리오3, 리오4, 파이시스1, 파이시스2, 파이시스3, 파이시스4, 이클립스, SANTAFE(231호5640)
+
     [파라미터 가이드]
+    - room_name: 위 목록 중 하나를 선택
     - start_date: 예약 시작일 ('오늘', '내일' 또는 'YYYY-MM-DD')
     - end_date: 예약 종료일 (기간 예약 시 사용. 생략하면 start_date와 동일하게 설정됨)
     - start_time, end_time: 'HH:mm' 형식 (예: 14:30)

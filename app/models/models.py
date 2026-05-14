@@ -358,7 +358,7 @@ class WorkPlanRequestModel(BaseModel):
 
 
 class MeetingRoomReservationModel(BaseModel):
-    room_name: str = Field(description="회의실명 (예: '리브라', '에리스')")
+    room_name: str = Field(description="회의실명 (예: '리브라', '에리스'). [조회 가능한 회의실 목록] 에리스, 캐프리콘, 리브라, 제미나이, 미라이, 스콜피오, 리오1, 리오2, 리오3, 리오4, 파이시스1, 파이시스2, 파이시스3, 파이시스4, 이클립스, SANTAFE(231호5640)")
     start_date: str = Field(
         validation_alias=AliasChoices('start_date', 'reservation_date', 'date'),
         description="예약 시작 날짜 (YYYY-MM-DD). '오늘', '내일' 등은 자동으로 변환됩니다."

@@ -8,12 +8,16 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from app.core.config import LoggingMiddleware
+from app.core.logging_config import init_logging
 from app.core.otel import setup_otel
 from app.core.server import mcp
 from app.crawler.base import cdp_manager
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from app.api.router import router as api_router
+
+# 로깅 초기화 호출
+init_logging()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -69,4 +73,4 @@ if __name__ == "__main__":
     # 메인 스레드에서 Uvicorn 실행
     # uvicorn.run은 현재 루프를 시작하고 lifespan을 실행합니다.
     logger.info(f"🌐 Starting FastAPI server on port {port}")
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level=os.getenv("LOG_LEVEL", "info").lower())

@@ -8,36 +8,110 @@ from app.crawler.base import BaseCrawler
 
 
 class MeetingRoomCrawler(BaseCrawler):
+    # 회의실 명칭과 내부 ObjNo 매핑 (HTML 실제 명칭 반영)
+    ROOM_MAPPING = {
+        "에리스": 1,
+        "캐프리콘": 2,
+        "리브라": 3,
+        "제미나이": 4,
+        "미라이": 15,
+        "스콜피오": 2,
+        "리오①": 6,
+        "리오②": 7,
+        "리오③": 8,
+        "리오④": 9,
+        "파이시스①": 10,
+        "파이시스②": 11,
+        "파이시스③": 12,
+        "파이시스④": 13,
+        "SANTAFE(231호5640)": 14,
+        "이클립스": 16
+    }
+
     def __init__(self, cookies: list = None):
         super().__init__(cookies)
 
-    async def fetch_reservations(self, room_name: str = None):
+    def _resolve_room_info(self, input_name: str):
+        """입력된 회의실 이름을 정규화하고 정식 명칭과 ObjNo를 반환합니다."""
+        if not input_name:
+            return None, None
+            
+        # 1. 기본 전처리: 공백 제거 및 대문자화
+        target_name = input_name.strip().upper().replace(" ", "")
+        
+        # 2. 숫자(1-4)를 원문자(①-④)로 변환하는 로직 추가
+        digit_to_circle = {
+            "1": "①", "2": "②", "3": "③", "4": "④"
+        }
+        for digit, circle in digit_to_circle.items():
+            if digit in target_name:
+                target_name = target_name.replace(digit, circle)
+        
+        # 3. SANTAFE 특수 처리
+        if "산타페" in target_name or "SANTAFE" in target_name:
+            return "SANTAFE(231호5640)", 14
 
+        # 4. 전체 매핑 순회하며 매칭 확인
+        for formal_name, obj_no in self.ROOM_MAPPING.items():
+            normalized_formal = formal_name.upper().replace(" ", "")
+            if target_name == normalized_formal:
+                return formal_name, obj_no
+        
+        return None, None
+
+    def _is_overlapping(self, start_time: str, end_time: str, existing_reservations: list):
+        """시간 겹침 여부를 확인합니다. (끝 시간과 시작 시간이 같은 경우는 겹치지 않는 것으로 간주)"""
+        def to_minutes(t_str):
+            try:
+                # '14:00' 또는 '오전 10:00' 등의 형식 대응
+                t_str = t_str.replace("오전", "").replace("오후", "").strip()
+                h, m = map(int, t_str.split(':'))
+                # 오후 처리 (단, 12시는 예외처리가 필요할 수 있으나 여기서는 단순화)
+                return h * 60 + m
+            except:
+                return 0
+
+        new_s = to_minutes(start_time)
+        new_e = to_minutes(end_time)
+
+        if new_s >= new_e:
+            return True, "시작 시간이 종료 시간보다 늦거나 같습니다."
+
+        for res in existing_reservations:
+            # res format: "10:00 - 11:00 [제목]"
+            match = re.search(r'(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})', res)
+            if match:
+                ex_s = to_minutes(match.group(1))
+                ex_e = to_minutes(match.group(2))
+
+                # 겹침 조건: (새 시작 < 기존 종료) AND (기존 시작 < 새 종료)
+                # 만약 new_s == ex_e 이거나 new_e == ex_s 이면 겹치지 않음 (교차점 허용)
+                if max(new_s, ex_s) < min(new_e, ex_e):
+                    return True, f"기존 예약({match.group(1)} - {match.group(2)})과 겹칩니다."
+        
+        return False, None
+
+    async def fetch_reservations(self, room_name: str = None):
         try:
-            # 2. 회의실 예약 페이지 이동 https://ekp.brycenkorea.co.kr:1212/RsvObjMgr/RsvObjUse_Trans.asp?ObjNo=3&Seq=-1&SelDate=2026-05-10&ObjName=%5B%EB%A6%AC%EB%B8%8C%EB%9D%BC%5D&SelYear=2026&SelWeek=20
-            url = f"{LOGIN_INFO["domain"]}/RsvObjMgr/RsvObj_List?cmbCateNo=1#RsvObjMgrLeftBoxShare0"
+            # 1. 예약 페이지 이동
+            url = f"{LOGIN_INFO['domain']}/RsvObjMgr/RsvObj_List"
             await self.page.goto(url)
             logger.info(f"[DEBUG] Navigated to URL: {self.page.url}")
 
-            # 무조건 대기하기보다 테이블이 렌더링될 때까지 대기
+            # 2. 테이블 렌더링 대기
             try:
-                table_element = await self.page.wait_for_selector('table.table_title, table', timeout=3000)
+                await self.page.wait_for_selector('td.table_title', timeout=5000)
             except Exception:
-                # 렌더링 지연 시 기존 방식인 2초 강제 대기로 폴백
                 await self.page.wait_for_timeout(2000)
-                table_element = await self.page.query_selector('table')
 
-            if not table_element:
-                logger.error("[ERROR] 예약 테이블이 없습니다.")
-                return {"status": "fail", "message": "예약 테이블을 찾을 수 없습니다.", "data": None}
+            # 전체 페이지 content를 가져와 BeautifulSoup으로 한 번에 처리
+            content = await self.page.content()
+            parsed_data = self.parse_meeting_room_table(content)
 
-            html = await table_element.inner_html()
-            parsed_data = self.parse_meeting_room_table(f"<table>{html}</table>")
-
-            logger.info(f"[DEBUG] parsed_data: {parsed_data}")
-
-            if room_name:
-                parsed_data = [room for room in parsed_data if room_name in room["회의실명"]]
+            if room_name and room_name != "전체":
+                resolved_name, _ = self._resolve_room_info(room_name)
+                search_term = resolved_name if resolved_name else room_name
+                parsed_data = [room for room in parsed_data if search_term in room["공유물명"]]
 
             return {
                 "status": "success",
@@ -53,32 +127,55 @@ class MeetingRoomCrawler(BaseCrawler):
     async def reserve_meeting_room(self, reservation_data: dict):
         """
         회의실 예약을 수행합니다.
-        reservation_data: {
-            "room_name": str,
-            "start_date": str, (YYYY-MM-DD)
-            "end_date": str, (YYYY-MM-DD)
-            "start_time": str, (HH:mm)
-            "end_time": str, (HH:mm)
-            "title": str,
-            "people_count": str,
-            "description": str
-        }
         """
         try:
-            room_name = reservation_data.get("room_name")
+            input_room_name = reservation_data.get("room_name")
+            formal_room_name, obj_no = self._resolve_room_info(input_room_name)
+            
+            if not formal_room_name:
+                valid_rooms = ", ".join(self.ROOM_MAPPING.keys())
+                return {
+                    "status": "fail", 
+                    "message": f"'{input_room_name}'은(는) 유효한 회의실 이름이 아닙니다. 정확한 이름을 입력해주세요. (예: {valid_rooms})"
+                }
+
             start_date = reservation_data.get("start_date")
             end_date = reservation_data.get("end_date") or start_date
             start_time = reservation_data.get("start_time")
             end_time = reservation_data.get("end_time")
             title = reservation_data.get("title")
-            people_count = reservation_data.get("people_count", "1")
+            people_count = str(reservation_data.get("people_count", "1"))
             description = reservation_data.get("description", ".")
 
-            # 1. 예약 페이지 이동
-            encoded_room_name = room_name if room_name.startswith("[") else f"[{room_name}]"
-            url = f"{LOGIN_INFO['domain']}/RsvObjMgr/RsvObjUse_Trans.asp?ObjNo=3&Seq=-1&SelDate={start_date}&ObjName={encoded_room_name}"
+            # 0. 시간 형식 및 10분 단위 검증
+            try:
+                s_h, s_m = start_time.split(":")
+                e_h, e_m = end_time.split(":")
+                if int(s_m) % 10 != 0 or int(e_m) % 10 != 0:
+                    return {
+                        "status": "fail",
+                        "message": f"회의실 예약은 10분 단위로만 가능합니다. (입력값: {start_time} - {end_time})"
+                    }
+            except Exception:
+                return {"status": "fail", "message": "시간 형식이 올바르지 않습니다. (예: 14:00)"}
+
+            # 1. 중복 예약 사전 체크 (선택 사항이나 권장됨)
+            status_res = await self.fetch_reservations(formal_room_name)
+            if status_res["status"] == "success" and status_res["data"]:
+                room_data = status_res["data"][0]
+                # 해당 날짜의 예약 목록 찾기
+                for date_key, reservations in room_data.get("예약현황", {}).items():
+                    if start_date in date_key:
+                        is_over, reason = self._is_overlapping(start_time, end_time, reservations)
+                        if is_over:
+                            logger.warning(f"[RESERVE] 중복 예약 감지: {reason}")
+                            return {"status": "fail", "message": f"해당 시간에 이미 예약이 있습니다. ({reason})"}
+
+            # 2. 예약 페이지 이동
+            encoded_room_name = f"[{formal_room_name}]"
+            url = f"{LOGIN_INFO['domain']}/RsvObjMgr/RsvObjUse_Trans.asp?ObjNo={obj_no}&Seq=-1&SelDate={start_date}&ObjName={encoded_room_name}"
             await self.page.goto(url)
-            logger.info(f"[RESERVE] Moving to reservation page: {self.page.url}")
+            logger.info(f"[RESERVE] Moving to reservation page: {self.page.url} (ObjNo: {obj_no})")
 
             # 2. 제목 입력
             await self.page.fill("#Subject", title)
@@ -99,7 +196,7 @@ class MeetingRoomCrawler(BaseCrawler):
             try:
                 s_h, s_m = start_time.split(":")
                 e_h, e_m = end_time.split(":")
-                
+
                 await self.page.select_option("select[name='st_hour']", s_h.zfill(2))
                 await self.page.select_option("select[name='st_minute']", s_m.zfill(2))
                 await self.page.select_option("select[name='ed_hour']", e_h.zfill(2))
@@ -124,7 +221,7 @@ class MeetingRoomCrawler(BaseCrawler):
                     "() => typeof oEditors_WebEditor1 !== 'undefined' && oEditors_WebEditor1.getById['WebEditor1']",
                     timeout=5000
                 )
-                
+
                 # HTML 형식으로 내용 주입 (개행 처리 포함)
                 logger.info(f"[RESERVE] Smart Editor 주입 시도 내용: {description}")
                 safe_desc = description.replace("'", "\\'").replace("\n", "<br>")
@@ -140,7 +237,7 @@ class MeetingRoomCrawler(BaseCrawler):
                 dialog_messages.append(dialog.message)
                 logger.info(f"[DIALOG] {dialog.message}")
                 await dialog.accept()
-            
+
             self.page.on("dialog", lambda d: asyncio.create_task(handle_dialog(d)))
 
             # 등록 전 화면 캡처 (디버깅용)
@@ -163,7 +260,7 @@ class MeetingRoomCrawler(BaseCrawler):
                 await self.page.wait_for_url("**/RsvObj_List*", timeout=7000)
                 return {
                     "status": "success",
-                    "message": f"[{room_name}] {start_date}~{end_date} {start_time}~{end_time} 예약이 성공적으로 등록되었습니다.",
+                    "message": f"[{formal_room_name}] {start_date}~{end_date} {start_time}~{end_time} 예약이 성공적으로 등록되었습니다.",
                     "url": self.page.url
                 }
             except:
@@ -176,150 +273,55 @@ class MeetingRoomCrawler(BaseCrawler):
             return {"status": "fail", "message": str(e)}
 
     @staticmethod
-    def _parse_room_kor_and_detail(room_html):
-        room_kor = room_html.find("a").get_text(strip=True) if room_html.find("a") else ""
-        room_detail = room_html.find("span")
-        room_detail_txt = room_detail.get_text(strip=True) if room_detail else ""
-        return room_kor, room_detail_txt
-
-    @staticmethod
-    def _parse_day_cell(td, day_name):
-        day_data = []
-        inner_tables = td.find_all("table")
-        if inner_tables:
-            for t in inner_tables:
-                approve_info = t.find("font")
-                if approve_info:
-                    parsed_res = MeetingRoomCrawler.parse_reservation_text(approve_info.get_text(strip=True))
-                    day_data.append(parsed_res)
-        if not day_data:
-            text = td.get_text(strip=True)
-            if text == "+":
-                day_data.append({"예약가능": True})
-        if not day_data:
-            day_data.append({})
-        return {
-            "요일": day_name,
-            "예약": day_data
-        }
-
-    @staticmethod
-    def parse_meeting_room_table(html):
+    def parse_meeting_room_table(html: str):
         soup = BeautifulSoup(html, "html.parser")
-        table = soup.find("table")
-        if not table:
-            raise ValueError("테이블이 없습니다!")
 
-        # 1. 실제 헤더 행 찾기 ("분류명"이 포함된 행)
-        header_row = None
-        all_trs = table.find_all("tr")
-        for tr in all_trs:
-            tr_text = tr.get_text(strip=True)
-            if "분류명" in tr_text and "Today" in tr_text:
-                header_row = tr
-                break
-        
-        if not header_row:
-            header_row = all_trs[0] if all_trs else None
-        
-        if not header_row:
-            raise ValueError("헤더 행을 찾을 수 없습니다.")
+        # 1. 'table_title' 클래스를 가진 td가 포함된 tr을 찾아 헤더로 설정
+        header_td = soup.find("td", class_="table_title")
+        if not header_td:
+            raise ValueError("예약 테이블 헤더를 찾을 수 없습니다.")
 
-        headers = [td.get_text(strip=True) for td in header_row.find_all("td")]
-        logger.debug(f"[DEBUG] Raw headers: {headers}")
+        header_row = header_td.find_parent("tr")
+        target_table = header_row.find_parent("table")
 
-        # 'Today' 또는 날짜 형식이 시작되는 인덱스 찾기
-        start_day_idx = 4 # 기본값 (분류명, 공유물명, 관리자, 신청구분 뒤)
-        for i, h in enumerate(headers):
-            if "Today" in h or "(" in h and ")" in h: # "Today(2026-05-10)" 또는 "月(MON)(...)" 형식
-                start_day_idx = i
-                break
-        
-        day_columns = headers[start_day_idx:]
-        logger.info(f"[DEBUG] Identified day columns: {day_columns}")
+        # 날짜 헤더 추출 (5번째 열부터 11번째 열까지)
+        all_header_tds = header_row.find_all("td", recursive=False)
+        day_headers = [td.get_text(separator=" ", strip=True) for td in all_header_tds[4:11]]
 
         result = []
-        # 헤더 행 이후부터 데이터 처리
-        header_reached = False
-        for row in all_trs:
-            cols = row.find_all("td")
-            if not cols or len(cols) < 5:
-                continue
-            
-            # 헤더 행을 만날 때까지 스킵
-            if not header_reached:
-                if "분류명" in row.get_text(strip=True):
-                    header_reached = True
+        # 2. 헤더 다음 행부터 데이터 추출
+        for tr in header_row.find_next_siblings("tr"):
+            cols = tr.find_all("td", recursive=False)
+            if len(cols) < 11:
                 continue
 
-            # 데이터 로우 파싱
-            category = cols[0].get_text(strip=True)
-            # 분류명이 '분류명'이면 헤더이므로 스킵
-            if category == "분류명" or not category:
-                continue
+            # 공유물명 추출: td 내부의 텍스트와 span 내의 상세 설명을 합치거나 핵심만 추출
+            # a 태그가 없을 경우를 대비해 td 전체 텍스트에서 불필요한 [사용일지] 등 제거
+            raw_room_info = cols[1].get_text(separator=" ", strip=True)
+            room_name = raw_room_info.replace("[사용일지]", "").strip()
 
-            room_kor, room_detail_txt = MeetingRoomCrawler._parse_room_kor_and_detail(cols[1])
-            manager = cols[2].get_text(strip=True)
-            apply_type = cols[3].get_text(strip=True)
+            days_data = {}
+            # 3. 7일치 예약 데이터 (인덱스 4 ~ 10)
+            for i in range(7):
+                td_idx = 4 + i
+                date_label = day_headers[i] if i < len(day_headers) else f"날짜_{i}"
 
-            # 요일별 데이터 매칭 (데이터 로우의 4번 인덱스부터 요일 시작)
-            days = []
-            day_cell_idx = 4
-            for i in range(len(day_columns)):
-                if day_cell_idx >= len(cols):
-                    break
-                
-                td = cols[day_cell_idx]
-                day_name = day_columns[i]
-                
-                # 예약 정보 파싱
-                parsed_day = MeetingRoomCrawler._parse_day_cell(td, day_name)
-                days.append(parsed_day)
-                
-                # 이 시스템의 특이점: 예약이 있으면 상세 셀(Detail)이 뒤따라옴.
-                # 요약 셀(Summary)은 '+'가 있거나 여러 예약 테이블을 포함함.
-                # 상세 셀은 보통 무시하고 다음 실제 요일 셀로 넘어가야 함.
-                # 하지만 정확한 '상세 셀' 개수를 알기 어려우므로, 
-                # 일단 1:1 매칭을 시도하되 인덱스 밀림을 최소화함.
-                day_cell_idx += 1
+                # 중첩된 테이블 내의 <font> 태그 텍스트만 추출
+                reservations = []
+                inner_fonts = cols[td_idx].find_all("font")
+                for font in inner_fonts:
+                    res_text = font.get_text(strip=True)
+                    if res_text and res_text != "+":  # '+' 기호 등 불필요한 텍스트 제외
+                        reservations.append(res_text)
 
-            result.append({
-                "분류명": category,
-                "회의실명": room_kor,
-                "상세정보": room_detail_txt,
-                "관리자": manager,
-                "신청구분": apply_type,
-                "요일별": days
-            })
+                # 예약이 없으면 빈 리스트 대신 None이나 생략하여 LLM 토큰 절약 가능
+                if reservations:
+                    days_data[date_label] = reservations
+
+            if days_data:  # 예약 정보가 하나라도 있는 방만 추가하거나, 구조 유지를 위해 포함
+                result.append({
+                    "공유물명": room_name,
+                    "예약현황": days_data
+                })
 
         return result
-
-    @staticmethod
-    def parse_reservation_text(res_text: str):
-        # 패턴: [승인] 11:00~11:50 제목(신청자,전화번호,...)
-        m = re.match(
-            r"(?:\[(?P<approve>.+?)\]\s*)?(?P<time>\d{2}:\d{2}~\d{2}:\d{2})?\s*(?P<title>.*?)(?:\((?P<people>.+?)\))?$",
-            res_text.strip())
-        if not m:
-            return {
-                "시간": None, "승인": None, "제목": res_text, "신청자": [], "전화번호": []
-            }
-        approve = bool(m.group("approve")) and ("승인" in m.group("approve"))
-        time = m.group("time")
-        subject = m.group("title").strip() if m.group("title") else ""
-        applier = []
-        tel = []
-        if m.group("people"):
-            people_parts = [p.strip() for p in m.group("people").split(",")]
-            for part in people_parts:
-                if re.match(r"\d{2,3}-\d{3,4}-\d{4}|010-\d{4}-\d{4}|\d{11}", part):
-                    tel.append(part)
-                elif part:
-                    applier.append(part)
-        return {
-            "시간": time,
-            "승인": approve,
-            "제목": subject,
-            "신청자": applier,
-            "전화번호": tel,
-        }
