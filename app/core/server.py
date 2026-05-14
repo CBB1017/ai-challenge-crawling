@@ -12,6 +12,7 @@ from app.core.utils import clean_user_name
 from app.crawler.approval import ApprovalCrawler
 from app.crawler.attendance import AttendanceCrawler
 from app.crawler.email import EmailCrawler
+from app.crawler.etc import EtcCrawler
 from app.crawler.meeting import MeetingRoomCrawler
 from app.crawler.overtime import OvertimeCalculator, get_list_for_submission, get_summary_for_report
 from app.models.models import OvertimeRequestModel, LeaveRequestModel, WorkPlanRequestModel, MeetingRoomReservationModel
@@ -79,6 +80,8 @@ async def get_meeting_room_status(
 ) -> str:
     """
     회의실 예약 현황을 조회합니다.
+    *중요: 예약 시 이전 예약 종료 시간과 다음 예약 시작 시간 사이에 최소 10분의 간격이 있어야 합니다.
+    (예: 13:00에 끝나는 예약이 있다면 다음 예약은 13:10부터 가능합니다.)
 
     [조회 가능한 회의실 목록]
     에리스, 캐프리콘, 리브라, 제미나이, 미라이, 스콜피오, 리오1, 리오2, 리오3, 리오4, 파이시스1, 파이시스2, 파이시스3, 파이시스4, 이클립스, SANTAFE(231호5640)
@@ -121,6 +124,10 @@ async def book_meeting_room(
     """
     회의실 예약을 진행합니다. (단일 날짜 또는 기간 범위 예약 지원)
     실제 예약을 생성하기 전에 get_meeting_room_status 툴을 호출하여 해당 시간대가 비어있는지 먼저 확인하는 것을 권장합니다.
+    
+    *중요 규정:
+    1. 시간 설정은 10분 단위로만 가능합니다. (예: 14:00, 14:10)
+    2. 예약 간 최소 10분의 간격이 필수입니다. (예: 12:00~13:00 예약이 있다면 다음 예약은 13:10부터 시작 가능)
 
     [조회 가능한 회의실 목록]
     에리스, 캐프리콘, 리브라, 제미나이, 미라이, 스콜피오, 리오1, 리오2, 리오3, 리오4, 파이시스1, 파이시스2, 파이시스3, 파이시스4, 이클립스, SANTAFE(231호5640)
@@ -149,6 +156,50 @@ async def book_meeting_room(
     async with MeetingRoomCrawler(cookies) as crawler:
         result = await crawler.reserve_meeting_room(data.model_dump())
         return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool()
+@requires_cookies
+async def get_recent_posts(
+        ctx: Context = None,
+        cookies: list = None
+) -> str:
+    """
+    그룹웨어 게시판의 최근 읽지 않은 게시물 목록을 조회합니다.
+    (별도의 파라미터는 필요하지 않습니다.)
+    """
+    logger.info("최근 게시물 조회 요청")
+    try:
+        meta = getattr(ctx.request_context, 'meta', {}) or {}
+        user_id = getattr(meta, "userId", None)
+        async with EtcCrawler(cookies, user_id) as crawler:
+            result = await crawler.fetch_recent_posts()
+            return json.dumps(result, ensure_ascii=False)
+    except Exception as e:
+        logger.error(f"최근 게시물 조회 오류: {e}")
+        return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
+
+
+@mcp.tool()
+@requires_cookies
+async def get_birthdays(
+        ctx: Context = None,
+        cookies: list = None
+) -> str:
+    """
+    이번 달 사내 생일자 목록을 조회합니다.
+    (별도의 파라미터는 필요하지 않습니다.)
+    """
+    logger.info("생일자 목록 조회 요청")
+    try:
+        meta = getattr(ctx.request_context, 'meta', {}) or {}
+        user_id = getattr(meta, "userId", None)
+        async with EtcCrawler(cookies, user_id) as crawler:
+            result = await crawler.fetch_birthdays()
+            return json.dumps(result, ensure_ascii=False)
+    except Exception as e:
+        logger.error(f"생일자 조회 오류: {e}")
+        return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
 
 
 # @mcp.tool()

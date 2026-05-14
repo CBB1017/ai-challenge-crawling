@@ -60,13 +60,16 @@ class MeetingRoomCrawler(BaseCrawler):
         return None, None
 
     def _is_overlapping(self, start_time: str, end_time: str, existing_reservations: list):
-        """시간 겹침 여부를 확인합니다. (끝 시간과 시작 시간이 같은 경우는 겹치지 않는 것으로 간주)"""
+        """
+        시간 겹침 및 10분 간격 여부를 확인합니다.
+        규정: 이전 예약 종료 시간과 다음 예약 시작 시간 사이에 최소 10분의 간격이 있어야 합니다.
+        예: 12:00 ~ 13:00 예약이 있으면 다음 예약은 13:10부터 가능합니다.
+        """
         def to_minutes(t_str):
             try:
                 # '14:00' 또는 '오전 10:00' 등의 형식 대응
                 t_str = t_str.replace("오전", "").replace("오후", "").strip()
                 h, m = map(int, t_str.split(':'))
-                # 오후 처리 (단, 12시는 예외처리가 필요할 수 있으나 여기서는 단순화)
                 return h * 60 + m
             except:
                 return 0
@@ -78,16 +81,16 @@ class MeetingRoomCrawler(BaseCrawler):
             return True, "시작 시간이 종료 시간보다 늦거나 같습니다."
 
         for res in existing_reservations:
-            # res format: "10:00 - 11:00 [제목]"
-            match = re.search(r'(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})', res)
+            # res format: "10:00 - 11:00 [제목]" 또는 "10:00~10:50 AI사업부"
+            match = re.search(r'(\d{1,2}:\d{2})\s*[-~]\s*(\d{1,2}:\d{2})', res)
             if match:
                 ex_s = to_minutes(match.group(1))
                 ex_e = to_minutes(match.group(2))
 
-                # 겹침 조건: (새 시작 < 기존 종료) AND (기존 시작 < 새 종료)
-                # 만약 new_s == ex_e 이거나 new_e == ex_s 이면 겹치지 않음 (교차점 허용)
-                if max(new_s, ex_s) < min(new_e, ex_e):
-                    return True, f"기존 예약({match.group(1)} - {match.group(2)})과 겹칩니다."
+                # 10분 간격 규정 적용:
+                # (새 시작 < 기존 종료 + 10) AND (기존 시작 < 새 종료 + 10)
+                if new_s < ex_e + 10 and ex_s < new_e + 10:
+                    return True, f"기존 예약({match.group(1)} - {match.group(2)})과 10분 이상의 간격이 필요합니다."
         
         return False, None
 

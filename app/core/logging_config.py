@@ -32,9 +32,21 @@ def init_logging():
     logging.basicConfig(handlers=[InterceptHandler()], level=0, force=True)
     
     # 특정 라이브러리의 로그 레벨 조정 (너무 상세한 로그 방지)
-    for logger_name in ["uvicorn", "uvicorn.access", "fastapi", "httpx"]:
-        logging.getLogger(logger_name).handlers = [InterceptHandler()]
-        logging.getLogger(logger_name).propagate = False
+    # httpx, opentelemetry 등 내부 통신 로그가 너무 많아 WARNING으로 상향 조정
+    noisy_loggers = [
+        "uvicorn", 
+        "uvicorn.access", 
+        "fastapi", 
+        "httpx", 
+        "httpcore",
+        "opentelemetry",
+        "urllib3"
+    ]
+    for logger_name in noisy_loggers:
+        l = logging.getLogger(logger_name)
+        l.setLevel(logging.WARNING)
+        l.handlers = [InterceptHandler()]
+        l.propagate = False
 
     # 2. loguru 설정
     logger.remove()  # 기본 핸들러 제거

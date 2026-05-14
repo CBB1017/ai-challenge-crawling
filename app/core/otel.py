@@ -32,27 +32,42 @@ def setup_otel(app):
 
     # 공통 OTLP 엔드포인트 설정 (Base URL)
     otlp_base_url = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318")
+    
+    # 엑스포트 간격 설정 (초 단위 -> 밀리초 단위 변환)
+    trace_export_interval = int(os.getenv("OTEL_TRACE_EXPORT_INTERVAL", "5000"))
+    metric_export_interval = int(os.getenv("OTEL_METRIC_EXPORT_INTERVAL", "30000"))
+    log_export_interval = int(os.getenv("OTEL_LOG_EXPORT_INTERVAL", "5000"))
 
     # 2. TracerProvider 설정 (Traces)
     tracer_provider = TracerProvider(resource=resource)
     otlp_trace_exporter = OTLPSpanExporter(endpoint=f"{otlp_base_url}/v1/traces")
-    tracer_provider.add_span_processor(BatchSpanProcessor(otlp_trace_exporter))
+    tracer_provider.add_span_processor(BatchSpanProcessor(
+        otlp_trace_exporter, 
+        schedule_delay_millis=trace_export_interval
+    ))
     trace.set_tracer_provider(tracer_provider)
 
     # 3. MeterProvider 설정 (Metrics)
     otlp_metric_exporter = OTLPMetricExporter(endpoint=f"{otlp_base_url}/v1/metrics")
-    reader = PeriodicExportingMetricReader(otlp_metric_exporter)
+    reader = PeriodicExportingMetricReader(
+        otlp_metric_exporter, 
+        export_interval_millis=metric_export_interval
+    )
     meter_provider = MeterProvider(resource=resource, metric_readers=[reader])
     metrics.set_meter_provider(meter_provider)
 
     # 4. LoggerProvider 설정 (Logs)
     otlp_log_exporter = OTLPLogExporter(endpoint=f"{otlp_base_url}/v1/logs")
     logger_provider = LoggerProvider(resource=resource)
-    logger_provider.add_log_record_processor(BatchLogRecordProcessor(otlp_log_exporter))
+    logger_provider.add_log_record_processor(BatchLogRecordProcessor(
+        otlp_log_exporter, 
+        schedule_delay_millis=log_export_interval
+    ))
     _logs.set_logger_provider(logger_provider)
 
     # 표준 logging 핸들러 추가 (표준 logging 로그를 OTLP로 전달)
-    logging_handler = LoggingHandler(level=logging.NOTSET, logger_provider=logger_provider)
+    # WARNING 이상만 OTLP로 전송하도록 설정하여 노이즈 감소
+    logging_handler = LoggingHandler(level=logging.INFO, logger_provider=logger_provider)
     logging.getLogger().addHandler(logging_handler)
 
     # 5. W3C Trace Context Propagator 설정

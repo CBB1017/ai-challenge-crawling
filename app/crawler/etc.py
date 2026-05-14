@@ -9,20 +9,12 @@ from app.session.session_manage_decorator import requires_system_session
 
 class EtcCrawler(BaseCrawler):
     def __init__(self, cookies: list = None, user_id: str = None):
-        super().__init__(cookies, user_id=user_id, password=LOGIN_INFO["password"])
+        super().__init__(cookies, user_id)
 
-    @requires_system_session
-    async def fetch_recent_posts(self, cookies: list = None):
+    async def fetch_recent_posts(self):
         """
         /Main/iFrame/BbsNewList 페이지에서 최근 게시물 중 읽지 않은 게시물을 가져옵니다.
         """
-        if cookies:
-            self.cookies = cookies
-            # 데코레이터에서 주입된 쿠키를 브라우저 컨텍스트에 적용
-            if self.context:
-                await self.context.add_cookies(self.cookies)
-                logger.info("데코레이터로부터 받은 세션 쿠키를 적용했습니다.")
-
         if not self.cookies:
             logger.warning("유효한 세션(쿠키)이 없습니다.")
             return {"status": "fail", "message": "세션이 만료되었습니다.", "code": "SESSION_EXPIRED"}
@@ -90,21 +82,13 @@ class EtcCrawler(BaseCrawler):
             logger.error(f"[ERROR] 최근 게시물 크롤링 실패: {e}")
             return {"status": "error", "message": str(e)}
 
-    @requires_system_session
-    async def fetch_component_posts(self, com_seq: str, cookies: list = None):
+    async def fetch_component_posts(self, com_seq: str):
         """
         /Main/DefaultComponentiFrame?ComSeq={com_seq} 페이지에서 읽지 않은 게시물을 가져옵니다.
         """
-        if cookies:
-            self.cookies = cookies
-            # 데코레이터에서 주입된 쿠키를 브라우저 컨텍스트에 적용
-            if self.context:
-                await self.context.add_cookies(self.cookies)
-                logger.info(f"컴포넌트({com_seq}): 데코레이터로부터 받은 세션 쿠키를 적용했습니다.")
-
         if not self.cookies:
             logger.warning("유효한 세션(쿠키)이 없습니다.")
-            return {"status": "fail", "message": "세션이 만료되었습니다.", "code": "SESSION_EXPIRED"}
+            return []
 
         try:
             url = f"{LOGIN_INFO['domain']}/Main/DefaultComponentiFrame?ComSeq={com_seq}"
@@ -184,18 +168,10 @@ class EtcCrawler(BaseCrawler):
             logger.error(f"[ERROR] 컴포넌트({com_seq}) 크롤링 실패: {e}")
             return []
 
-    @requires_system_session
-    async def fetch_birthdays(self, cookies: list = None):
+    async def fetch_birthdays(self):
         """
         /Etc/Birthday 페이지에서 해당 달의 생일자 목록을 가져옵니다.
         """
-        if cookies:
-            self.cookies = cookies
-            # 데코레이터에서 주입된 쿠키를 브라우저 컨텍스트에 적용
-            if self.context:
-                await self.context.add_cookies(self.cookies)
-                logger.info("생일자: 데코레이터로부터 받은 세션 쿠키를 적용했습니다.")
-
         if not self.cookies:
             logger.warning("유효한 세션(쿠키)이 없습니다.")
             return {"status": "fail", "message": "세션이 만료되었습니다.", "code": "SESSION_EXPIRED"}
