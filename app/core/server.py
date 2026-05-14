@@ -182,6 +182,35 @@ async def get_recent_posts(
 
 @mcp.tool()
 @requires_cookies
+async def get_board_posts(
+        ctx: Context = None,
+        cookies: list = None
+) -> str:
+    """
+    전사 게시판 및 주요 부서 게시판의 최근 읽지 않은 게시물들을 카테고리별로 조회합니다.
+    (별도의 파라미터는 필요하지 않습니다.)
+    """
+    logger.info("주요 게시판 게시물 조회 요청")
+    try:
+        meta = getattr(ctx.request_context, 'meta', {}) or {}
+        user_id = getattr(meta, "userId", None)
+        com_seqs = ["7003", "7004", "7010", "7036"]
+        
+        async with EtcCrawler(cookies, user_id) as crawler:
+            all_posts = {}
+            for seq in com_seqs:
+                posts = await crawler.fetch_component_posts(seq)
+                all_posts[seq] = posts
+            
+            logger.info(f"게시판 데이터 수집 완료 (총 {sum(len(v) for v in all_posts.values())}건)")
+            return json.dumps({"status": "success", "data": all_posts}, ensure_ascii=False)
+    except Exception as e:
+        logger.error(f"게시판 게시물 조회 오류: {e}")
+        return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
+
+
+@mcp.tool()
+@requires_cookies
 async def get_birthdays(
         ctx: Context = None,
         cookies: list = None
